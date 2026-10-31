@@ -1,4 +1,6 @@
 
+from typing import Any
+
 from app.services.trading.strategies.base import TradingStrategy
 
 
@@ -45,8 +47,13 @@ class StrategyRegistry:
     def get(
         cls,
         strategy_type: str,
+        **dependencies: Any,
     ) -> TradingStrategy:
-        """Retrieve an instance of a registered strategy."""
+        """
+        Retrieve a new strategy instance.
+
+        Optional dependencies are passed to the strategy constructor.
+        """
 
         strategy_class = cls._strategies.get(strategy_type)
 
@@ -58,7 +65,7 @@ class StrategyRegistry:
                 f"Available strategies: {available or 'none'}."
             )
 
-        return strategy_class()
+        return strategy_class(**dependencies)
 
     @classmethod
     def supported_strategies(cls) -> tuple[str, ...]:

@@ -17,9 +17,15 @@ class OllamaClient:
         timeout_seconds: float = 180.0,
         http_client: httpx.Client | None = None,
     ):
+        if timeout_seconds <= 0:
+            raise ValueError("Timeout must be greater than zero.")
+
         self.base_url = (base_url or settings.OLLAMA_BASE_URL).rstrip("/")
         self.model = model or settings.OLLAMA_MODEL
         self.timeout_seconds = timeout_seconds
+
+        self._owns_http_client = http_client is None
+        self._closed = False
 
         self._http_client = http_client or httpx.Client(
             timeout=httpx.Timeout(timeout_seconds)
@@ -30,11 +36,10 @@ class OllamaClient:
         messages: list[dict[str, str]],
         response_schema: type[BaseModel],
     ) -> str:
-        """
-        Send a chat request to Ollama and request structured JSON output.
+        """Send a structured chat request to Ollama."""
 
-        Returns the model's response content as a string.
-        """
+        if self._closed:
+            raise OllamaClientError("Ollama client is closed.")
 
         payload = {
             "model": self.model,
@@ -53,7 +58,6 @@ class OllamaClient:
             )
 
             response.raise_for_status()
-
             response_data = response.json()
 
         except httpx.TimeoutException as error:
@@ -93,7 +97,15 @@ class OllamaClient:
         return content
 
     def close(self) -> None:
-        self._http_client.close()
+        """Close the HTTP client if this instance owns it."""
+
+        if self._closed:
+            return
+
+        if self._owns_http_client:
+            self._http_client.close()
+
+        self._closed = True
 
     def __enter__(self):
         return self

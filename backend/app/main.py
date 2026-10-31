@@ -1,3 +1,6 @@
+
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -6,10 +9,37 @@ from app.api.routes.competition import router as competitions_router
 from app.api.routes.orders import router as orders_router
 from app.api.routes import portfolio
 from app.api.routes import snapshots
+
+from app.services.llm.ollama_client import OllamaClient
+from app.services.trading.decision_service import DecisionOrchestrator
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Manage application-wide resources.
+    """
+
+    ollama_client = OllamaClient()
+
+    try:
+        app.state.ollama_client = ollama_client
+
+        app.state.decision_orchestrator = DecisionOrchestrator(
+            ollama_client=ollama_client
+        )
+
+        yield
+
+    finally:
+        ollama_client.close()
+
+
 app = FastAPI(
     title="AI Investment Arena",
     description="AI-powered stock investment competition",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -25,6 +55,8 @@ app.include_router(competitions_router)
 app.include_router(orders_router)
 app.include_router(portfolio.router)
 app.include_router(snapshots.router)
+
+
 @app.get("/")
 async def root():
     return {
@@ -37,4 +69,3 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
-

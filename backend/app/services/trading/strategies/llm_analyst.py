@@ -87,10 +87,40 @@ class LLMAnalystStrategy(TradingStrategy):
 
         compact_stocks = []
 
+        seen_symbols = set()
+
         for stock in stocks:
+            if not isinstance(stock, dict):
+                raise LLMStrategyError(
+                    "Invalid stock entry in market context."
+                )
+
+            symbol = stock.get("symbol")
+
+            if not isinstance(symbol, str) or not symbol.strip():
+                raise LLMStrategyError(
+                    "Stock entry has an invalid symbol."
+                )
+
+            symbol = symbol.strip().upper()
+
+            if symbol in seen_symbols:
+                raise LLMStrategyError(
+                    f"Duplicate stock in market context: {symbol}"
+                )
+
+            seen_symbols.add(symbol)
+
+            indicators = stock.get("indicators", {})
+
+            if not isinstance(indicators, dict):
+                raise LLMStrategyError(
+                    f"Invalid indicators for stock: {symbol}"
+                )
+
             compact_stocks.append(
                 {
-                    "symbol": stock["symbol"],
+                    "symbol": symbol,
                     "sector": stock.get("sector"),
                     "latest_price": stock.get("latest_price"),
                     "latest_bar_date": stock.get("latest_bar_date"),
@@ -98,9 +128,22 @@ class LLMAnalystStrategy(TradingStrategy):
                         "expected_latest_session_date"
                     ),
                     "data_status": stock.get("data_status"),
-                    "indicators": stock.get("indicators", {}),
+                    "indicators": indicators,
                 }
             )
+
+            {
+                "symbol": stock["symbol"],
+                "sector": stock.get("sector"),
+                "latest_price": stock.get("latest_price"),
+                "latest_bar_date": stock.get("latest_bar_date"),
+                "expected_latest_session_date": stock.get(
+                    "expected_latest_session_date"
+                ),
+                "data_status": stock.get("data_status"),
+                "indicators": stock.get("indicators", {}),
+            }
+        
 
         benchmark = context.get("benchmark")
 
@@ -114,10 +157,51 @@ class LLMAnalystStrategy(TradingStrategy):
             "indicators": benchmark.get("indicators", {}),
         }
 
+        
         portfolio = context.get("portfolio")
 
         if not isinstance(portfolio, dict):
             raise LLMStrategyError("Portfolio context is missing.")
+
+        holdings = portfolio.get("holdings")
+
+        if not isinstance(holdings, list):
+            raise LLMStrategyError("Invalid portfolio holdings.")
+
+        seen_holding_symbols = set()
+
+        for holding in holdings:
+            if not isinstance(holding, dict):
+                raise LLMStrategyError(
+                    "Invalid holding in portfolio context."
+                )
+
+            symbol = holding.get("symbol")
+            quantity = holding.get("quantity")
+
+            if not isinstance(symbol, str) or not symbol.strip():
+                raise LLMStrategyError(
+                    "Portfolio holding has an invalid symbol."
+                )
+
+            symbol = symbol.strip().upper()
+
+            if symbol in seen_holding_symbols:
+                raise LLMStrategyError(
+                    f"Duplicate portfolio holding: {symbol}"
+                )
+
+            seen_holding_symbols.add(symbol)
+
+            if (
+                isinstance(quantity, bool)
+                or not isinstance(quantity, int)
+                or quantity <= 0
+            ):
+                raise LLMStrategyError(
+                    f"Invalid holding quantity for {symbol}."
+                )
+
 
         return {
             "as_of_date": context.get("as_of_date"),

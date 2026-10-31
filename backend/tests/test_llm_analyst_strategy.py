@@ -332,3 +332,56 @@ def test_rejects_sell_quantity_of_zero():
 
     with pytest.raises(LLMStrategyError):
         strategy.generate_decision(context)
+
+
+def test_rejects_malformed_stock_context():
+    context = build_market_context()
+    context["universe"]["stocks"][0] = None
+
+    client = FakeOllamaClient(make_response())
+    strategy = LLMAnalystStrategy(ollama_client=client)
+
+    with pytest.raises(LLMStrategyError):
+        strategy.generate_decision(context)
+
+
+def test_rejects_malformed_holding_when_selling():
+    context = build_market_context()
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "NVDA",
+            # Deliberately missing quantity.
+            "average_entry_price": 190.0,
+        }
+    ]
+
+    decisions = [
+        {
+            "symbol": "NVDA",
+            "action": "sell",
+            "quantity": 1,
+            "confidence": 0.9,
+            "rationale": "Reducing exposure.",
+        }
+    ]
+
+    client = FakeOllamaClient(make_response(decisions))
+    strategy = LLMAnalystStrategy(ollama_client=client)
+
+    with pytest.raises(LLMStrategyError):
+        strategy.generate_decision(context)
+
+
+def test_includes_stale_benchmark_status_in_prompt():
+    context = build_market_context()
+    context["benchmark"]["data_status"] = "stale_or_missing"
+
+    client = FakeOllamaClient(make_response())
+    strategy = LLMAnalystStrategy(ollama_client=client)
+
+    strategy.generate_decision(context)
+
+    user_message = client.last_messages[1]["content"]
+
+    assert '"data_status":"stale_or_missing"' in user_message
+    assert '"symbol":"SPY"' in user_message
