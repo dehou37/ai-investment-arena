@@ -1,122 +1,294 @@
-import { useState } from 'react'
-import heroImg from './assets/hero.png'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import './App.css'
+
+import { useEffect, useMemo, useState } from "react";
+
+import { getStocks, getStockBars } from "./services/api";
+import type { Stock, StockBar } from "./types/market";
+import StockChart from "./components/StockChart";
+
+import "./App.css";
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [stocks, setStocks] = useState<Stock[]>([]);
+  const [selectedSymbol, setSelectedSymbol] = useState("NVDA");
+  const [bars, setBars] = useState<StockBar[]>([]);
+  const [loadingStocks, setLoadingStocks] = useState(true);
+  const [loadingBars, setLoadingBars] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    async function loadStocks() {
+      try {
+        const data = await getStocks();
+        setStocks(data);
+
+        if (data.length > 0) {
+          setSelectedSymbol((current) =>
+            data.some((stock) => stock.symbol === current)
+              ? current
+              : data[0].symbol,
+          );
+        }
+      } catch {
+        setError("Unable to retrieve stocks from the backend.");
+      } finally {
+        setLoadingStocks(false);
+      }
+    }
+
+    loadStocks();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadBars() {
+      setLoadingBars(true);
+      setError("");
+
+      try {
+        const data = await getStockBars(selectedSymbol);
+
+        if (!cancelled) {
+          setBars(data);
+        }
+      } catch {
+        if (!cancelled) {
+          setBars([]);
+          setError(`Unable to retrieve historical data for ${selectedSymbol}.`);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingBars(false);
+        }
+      }
+    }
+
+    if (selectedSymbol) {
+      loadBars();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSymbol]);
+
+  const latestBar = bars[0];
+  const previousBar = bars[1];
+
+  const priceChange = useMemo(() => {
+    if (!latestBar || !previousBar || previousBar.close === 0) {
+      return null;
+    }
+
+    const difference = latestBar.close - previousBar.close;
+
+    return {
+      difference,
+      percentage: (difference / previousBar.close) * 100,
+    };
+  }, [latestBar, previousBar]);
+
+  const selectedStock = stocks.find(
+    (stock) => stock.symbol === selectedSymbol,
+  );
+
+  const formatPrice = (value: number) =>
+    new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+    }).format(value);
+
+  const formatDate = (value: string) =>
+    new Date(value).toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      timeZone: "UTC",
+    });
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
+    <div className="app">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-icon">A</div>
+          <div>
+            <h2>Investment Arena</h2>
+            <span>AI Trading Competition</span>
+          </div>
         </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
 
-      <div className="ticks"></div>
+        <nav>
+          <div className="nav-item active">Market Overview</div>
+          <div className="nav-item disabled">AI Agents</div>
+          <div className="nav-item disabled">Leaderboard</div>
+          <div className="nav-item disabled">Portfolio</div>
+        </nav>
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
+        <div className="sidebar-footer">
+          <span className="status-dot" />
+          Market data connected
         </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+      </aside>
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+      <main className="main">
+        <header className="topbar">
+          <div>
+            <h1>Market Overview</h1>
+            <p>Monitor your tracked US stocks.</p>
+          </div>
+          <div className="feed-badge">ALPACA · IEX FEED</div>
+        </header>
+
+        {error && <div className="error">{error}</div>}
+
+        <section className="summary-grid">
+          <div className="summary-card">
+            <span>Tracked stocks</span>
+            <strong>{stocks.length}</strong>
+            <small>In your watchlist</small>
+          </div>
+
+          <div className="summary-card">
+            <span>Selected stock</span>
+            <strong>{selectedSymbol || "—"}</strong>
+            <small>{selectedStock?.exchange ?? "—"}</small>
+          </div>
+
+          <div className="summary-card">
+            <span>Latest closing price</span>
+            <strong>
+              {latestBar ? formatPrice(latestBar.close) : "—"}
+            </strong>
+            <small>
+              {latestBar ? formatDate(latestBar.timestamp) : "No data"}
+            </small>
+          </div>
+
+          <div className="summary-card">
+            <span>Daily change</span>
+            <strong
+              className={
+                priceChange
+                  ? priceChange.difference >= 0
+                    ? "positive"
+                    : "negative"
+                  : ""
+              }
+            >
+              {priceChange
+                ? `${priceChange.difference >= 0 ? "+" : ""}${priceChange.percentage.toFixed(2)}%`
+                : "—"}
+            </strong>
+            <small>Compared with previous bar</small>
+          </div>
+        </section>
+
+        <section className="content-grid">
+          <div className="panel watchlist">
+            <div className="panel-heading">
+              <div>
+                <h2>Watchlist</h2>
+                <p>Your tracked stocks</p>
+              </div>
+            </div>
+
+            {loadingStocks ? (
+              <p className="muted">Loading stocks...</p>
+            ) : stocks.length === 0 ? (
+              <p className="muted">No stocks found.</p>
+            ) : (
+              stocks.map((stock) => (
+                <button
+                  key={stock.id}
+                  className={`stock-row ${
+                    selectedSymbol === stock.symbol ? "selected" : ""
+                  }`}
+                  onClick={() => setSelectedSymbol(stock.symbol)}
+                >
+                  <div className="stock-symbol">{stock.symbol}</div>
+                  <div className="stock-details">
+                    <strong>{stock.name}</strong>
+                    <span>{stock.exchange}</span>
+                  </div>
+                  <span className="row-arrow">›</span>
+                </button>
+              ))
+            )}
+          </div>
+
+          <div className="panel chart-panel">
+            <div className="panel-heading">
+              <div>
+                <h2>{selectedSymbol} Price Chart</h2>
+                <p>
+                  {selectedStock?.name ?? "Historical daily prices"}
+                </p>
+              </div>
+              <span className="chart-period">1D</span>
+            </div>
+
+            {loadingBars ? (
+              <div className="chart-message">Loading historical prices...</div>
+            ) : bars.length === 0 ? (
+              <div className="chart-message">
+                No historical data available.
+              </div>
+            ) : (
+              <>
+                <StockChart bars={bars} />
+
+                <div className="chart-footer">
+                  <span>{bars.length} daily bars</span>
+                  <span>Source: Alpaca IEX</span>
+                </div>
+              </>
+            )}
+          </div>
+        </section>
+
+        <section className="panel data-panel">
+          <div className="panel-heading">
+            <div>
+              <h2>Historical Prices</h2>
+              <p>Most recent trading sessions</p>
+            </div>
+          </div>
+
+          <div className="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Open</th>
+                  <th>High</th>
+                  <th>Low</th>
+                  <th>Close</th>
+                  <th>Volume</th>
+                </tr>
+              </thead>
+              <tbody>
+                {bars.slice(0, 10).map((bar) => (
+                  <tr key={bar.timestamp}>
+                    <td>{formatDate(bar.timestamp)}</td>
+                    <td>{formatPrice(bar.open)}</td>
+                    <td>{formatPrice(bar.high)}</td>
+                    <td>{formatPrice(bar.low)}</td>
+                    <td>{formatPrice(bar.close)}</td>
+                    <td>{bar.volume.toLocaleString("en-US")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <footer>
+          AI Investment Arena · Paper trading simulation · Market data
+          provided by Alpaca
+        </footer>
+      </main>
+    </div>
+  );
 }
 
-export default App
+export default App;
