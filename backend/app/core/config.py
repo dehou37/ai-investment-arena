@@ -1,3 +1,4 @@
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,6 +9,8 @@ class Settings(BaseSettings):
     ALPACA_SECRET_KEY: str
     ALPACA_DATA_URL: str = "https://data.alpaca.markets"
     ALPACA_FEED: str = "iex"
+
+    FMP_API_KEY: str | None = None
 
     DATABASE_URL: str
 
