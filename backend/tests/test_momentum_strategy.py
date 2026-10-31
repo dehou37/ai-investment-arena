@@ -230,3 +230,127 @@ def test_invalid_maximum_positions_is_rejected():
 
     with pytest.raises(ValueError):
         strategy.generate_decision(context)
+
+def test_sells_entire_position_when_momentum_turns_negative():
+    strategy = MomentumStrategy()
+    context = create_test_context()
+
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "NVDA",
+            "quantity": 5,
+            "average_entry_price": 100.0,
+        }
+    ]
+
+    context["universe"]["stocks"][0]["indicators"]["momentum_20d"] = -0.05
+
+    result = strategy.generate_decision(context)
+
+    sell_decisions = [
+        decision
+        for decision in result.decisions
+        if decision.action == "sell"
+    ]
+
+    assert len(sell_decisions) == 1
+    assert sell_decisions[0].symbol == "NVDA"
+    assert sell_decisions[0].quantity == 5
+
+
+def test_sells_entire_position_when_sma20_falls_below_sma50():
+    strategy = MomentumStrategy()
+    context = create_test_context()
+
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "NVDA",
+            "quantity": 5,
+            "average_entry_price": 100.0,
+        }
+    ]
+
+    context["universe"]["stocks"][0]["indicators"]["sma_20"] = 95.0
+    context["universe"]["stocks"][0]["indicators"]["sma_50"] = 100.0
+
+    result = strategy.generate_decision(context)
+
+    sell_decisions = [
+        decision
+        for decision in result.decisions
+        if decision.action == "sell"
+    ]
+
+    assert len(sell_decisions) == 1
+    assert sell_decisions[0].symbol == "NVDA"
+    assert sell_decisions[0].quantity == 5
+
+
+def test_does_not_sell_when_momentum_conditions_remain_positive():
+    strategy = MomentumStrategy()
+    context = create_test_context()
+
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "NVDA",
+            "quantity": 5,
+            "average_entry_price": 100.0,
+        }
+    ]
+
+    result = strategy.generate_decision(context)
+
+    sell_decisions = [
+        decision
+        for decision in result.decisions
+        if decision.action == "sell"
+    ]
+
+    assert sell_decisions == []
+
+
+def test_does_not_sell_holding_with_stale_market_data():
+    strategy = MomentumStrategy()
+    context = create_test_context()
+
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "INTC",
+            "quantity": 10,
+            "average_entry_price": 50.0,
+        }
+    ]
+
+    result = strategy.generate_decision(context)
+
+    sell_decisions = [
+        decision
+        for decision in result.decisions
+        if decision.action == "sell"
+    ]
+
+    assert sell_decisions == []
+
+
+def test_can_generate_sell_decisions_without_available_cash():
+    strategy = MomentumStrategy()
+    context = create_test_context()
+
+    context["portfolio"]["cash_balance"] = 0.0
+
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "NVDA",
+            "quantity": 5,
+            "average_entry_price": 100.0,
+        }
+    ]
+
+    context["universe"]["stocks"][0]["indicators"]["momentum_20d"] = -0.05
+
+    result = strategy.generate_decision(context)
+
+    assert len(result.decisions) == 1
+    assert result.decisions[0].symbol == "NVDA"
+    assert result.decisions[0].action == "sell"
+    assert result.decisions[0].quantity == 5

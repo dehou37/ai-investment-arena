@@ -1,4 +1,3 @@
-
 from datetime import date
 from math import floor
 from typing import Any
@@ -11,18 +10,23 @@ class MomentumStrategy(TradingStrategy):
     """
     Momentum strategy.
 
+    Exit conditions:
+    - 20-day momentum becomes zero or negative.
+    - SMA20 falls to or below SMA50.
+    - Only sells when market data and required indicators are current.
+
     Entry conditions:
     - Stock has current market data.
     - 20-day momentum exceeds the configured minimum.
     - SMA20 is above SMA50.
 
     The strategy:
-    - Ranks qualifying stocks by 20-day momentum.
-    - Selects the strongest candidates.
+    - Sells the entire existing position when an exit condition is met.
+    - Ranks new candidates by 20-day momentum.
     - Avoids purchasing existing holdings.
     - Uses whole shares only.
     - Respects available buying power.
-    - Does not sell or execute orders.
+    - Does not submit or execute orders.
     """
 
     strategy_type = "momentum"
@@ -79,18 +83,100 @@ class MomentumStrategy(TradingStrategy):
                 "max_new_positions must be a positive integer."
             )
 
-        if initial_cash <= 0 or available_cash <= 0:
-            return AgentDecision(
-                as_of_date=as_of_date,
-                summary="No available cash for momentum investments.",
-                decisions=[],
-            )
-
-        existing_holdings = {
-            holding["symbol"].upper()
+        # Map current holdings by stock symbol.
+        holdings = {
+            holding["symbol"].upper(): holding
             for holding in portfolio["holdings"]
             if holding["quantity"] > 0
         }
+
+        stock_by_symbol = {
+            stock["symbol"].upper(): stock
+            for stock in universe["stocks"]
+        }
+
+        decisions = []
+        symbols_to_sell = set()
+
+        # --------------------------------------------------
+        # 1. Evaluate existing positions for exit conditions.
+        # --------------------------------------------------
+
+        for symbol, holding in holdings.items():
+
+            stock = stock_by_symbol.get(symbol)
+
+            # Never make exit decisions using stale or missing data.
+            if stock is None or stock.get("data_status") != "current":
+                continue
+
+            indicators = stock.get("indicators") or {}
+
+            momentum = indicators.get("momentum_20d")
+            sma_20 = indicators.get("sma_20")
+            sma_50 = indicators.get("sma_50")
+
+            if momentum is None or sma_20 is None or sma_50 is None:
+                continue
+
+            momentum = float(momentum)
+            sma_20 = float(sma_20)
+            sma_50 = float(sma_50)
+
+            exit_reasons = []
+
+            if momentum <= 0:
+                exit_reasons.append(
+                    f"20-day momentum turned negative or neutral "
+                    f"({momentum:.2%})"
+                )
+
+            if sma_20 <= sma_50:
+                exit_reasons.append(
+                    "SMA20 fell to or below SMA50"
+                )
+
+            if not exit_reasons:
+                continue
+
+            quantity = int(holding["quantity"])
+
+            if quantity <= 0:
+                continue
+
+            decisions.append(
+                AgentTradeDecision(
+                    symbol=symbol,
+                    action="sell",
+                    quantity=quantity,
+                    confidence=0.90,
+                    rationale=(
+                        "Momentum exit condition triggered: "
+                        + "; ".join(exit_reasons)
+                        + ". Selling the entire existing position."
+                    ),
+                )
+            )
+
+            symbols_to_sell.add(symbol)
+
+        # --------------------------------------------------
+        # 2. Evaluate new BUY opportunities.
+        # --------------------------------------------------
+
+        if initial_cash <= 0 or available_cash <= 0:
+            summary = (
+                f"Generated {len(decisions)} sell decisions. "
+                "No available cash for new momentum investments."
+            )
+
+            return AgentDecision(
+                as_of_date=as_of_date,
+                summary=summary,
+                decisions=decisions,
+            )
+
+        existing_holdings = set(holdings.keys())
 
         candidates = []
 
@@ -122,20 +208,19 @@ class MomentumStrategy(TradingStrategy):
             sma_20 = float(sma_20)
             sma_50 = float(sma_50)
 
-            # Require positive momentum above the configured threshold.
             if momentum <= min_momentum:
                 continue
 
-            # Confirm that the shorter-term trend is above the
-            # longer-term trend.
             if sma_20 <= sma_50:
                 continue
 
-            candidates.append({
-                "symbol": symbol,
-                "latest_price": float(latest_price),
-                "momentum": momentum,
-            })
+            candidates.append(
+                {
+                    "symbol": symbol,
+                    "latest_price": float(latest_price),
+                    "momentum": momentum,
+                }
+            )
 
         # Strongest positive momentum first.
         candidates.sort(
@@ -146,12 +231,15 @@ class MomentumStrategy(TradingStrategy):
         selected_candidates = candidates[:max_new_positions]
 
         if not selected_candidates:
+            summary = (
+                f"Generated {len(decisions)} sell decisions. "
+                "No new stocks met the momentum entry conditions."
+            )
+
             return AgentDecision(
                 as_of_date=as_of_date,
-                summary=(
-                    "No stocks met the momentum entry conditions."
-                ),
-                decisions=[],
+                summary=summary,
+                decisions=decisions,
             )
 
         total_budget = min(
@@ -159,11 +247,7 @@ class MomentumStrategy(TradingStrategy):
             available_cash / self.ORDER_RESERVATION_BUFFER,
         )
 
-        target_per_stock = (
-            total_budget / len(selected_candidates)
-        )
-
-        decisions = []
+        target_per_stock = total_budget / len(selected_candidates)
 
         for candidate in selected_candidates:
 
@@ -182,7 +266,6 @@ class MomentumStrategy(TradingStrategy):
 
             momentum = candidate["momentum"]
 
-            # Confidence increases with momentum strength, capped at 0.95.
             confidence = min(
                 0.95,
                 0.60 + momentum * 2,
@@ -202,10 +285,21 @@ class MomentumStrategy(TradingStrategy):
                 )
             )
 
+        buy_count = sum(
+            decision.action == "buy"
+            for decision in decisions
+        )
+
+        sell_count = sum(
+            decision.action == "sell"
+            for decision in decisions
+        )
+
         summary = (
-            f"Identified {len(candidates)} momentum candidates and "
-            f"generated {len(decisions)} buy decisions from the "
-            f"strongest {len(selected_candidates)} candidates."
+            f"Generated {sell_count} sell decisions and "
+            f"{buy_count} buy decisions. "
+            f"Identified {len(candidates)} qualifying momentum "
+            "candidates and selected the strongest candidates."
         )
 
         return AgentDecision(

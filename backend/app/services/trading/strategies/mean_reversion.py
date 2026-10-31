@@ -17,14 +17,17 @@ class MeanReversionStrategy(TradingStrategy):
     - Negative 20-day momentum.
     - Latest price below SMA20.
 
-    Candidates are ranked by lowest RSI first.
+    Exit conditions:
+    - RSI14 reaches or exceeds the configured exit threshold.
+    - Only sells when market data and RSI are current.
 
     The strategy:
-    - Avoids existing holdings.
+    - Sells the entire existing position when an exit condition is met.
+    - Ranks new candidates by lowest RSI first.
     - Uses equal allocation across selected candidates.
     - Buys whole shares only.
     - Respects available buying power.
-    - Does not sell or execute orders.
+    - Does not submit or execute orders.
     """
 
     strategy_type = "mean_reversion"
@@ -32,6 +35,7 @@ class MeanReversionStrategy(TradingStrategy):
     DEFAULT_ALLOCATION_FRACTION = 0.95
     ORDER_RESERVATION_BUFFER = 1.05
     DEFAULT_MAX_RSI = 30.0
+    DEFAULT_EXIT_RSI = 60.0
     DEFAULT_MAX_NEW_POSITIONS = 5
 
     def generate_decision(
@@ -65,6 +69,13 @@ class MeanReversionStrategy(TradingStrategy):
             )
         )
 
+        exit_rsi = float(
+            config.get(
+                "exit_rsi",
+                self.DEFAULT_EXIT_RSI,
+            )
+        )
+
         max_new_positions = config.get(
             "max_new_positions",
             self.DEFAULT_MAX_NEW_POSITIONS,
@@ -81,6 +92,11 @@ class MeanReversionStrategy(TradingStrategy):
                 "max_rsi must be greater than 0 and no greater than 100."
             )
 
+        if not 0 < exit_rsi <= 100:
+            raise ValueError(
+                "exit_rsi must be greater than 0 and no greater than 100."
+            )
+
         if (
             isinstance(max_new_positions, bool)
             or not isinstance(max_new_positions, int)
@@ -90,18 +106,79 @@ class MeanReversionStrategy(TradingStrategy):
                 "max_new_positions must be a positive integer."
             )
 
-        if initial_cash <= 0 or available_cash <= 0:
-            return AgentDecision(
-                as_of_date=as_of_date,
-                summary="No available cash for mean-reversion investments.",
-                decisions=[],
-            )
-
-        existing_holdings = {
-            holding["symbol"].upper()
+        holdings = {
+            holding["symbol"].upper(): holding
             for holding in portfolio["holdings"]
             if holding["quantity"] > 0
         }
+
+        stock_by_symbol = {
+            stock["symbol"].upper(): stock
+            for stock in universe["stocks"]
+        }
+
+        decisions = []
+
+        # --------------------------------------------------
+        # 1. Evaluate existing positions for exit conditions.
+        # --------------------------------------------------
+
+        for symbol, holding in holdings.items():
+
+            stock = stock_by_symbol.get(symbol)
+
+            if stock is None or stock.get("data_status") != "current":
+                continue
+
+            indicators = stock.get("indicators") or {}
+            rsi = indicators.get("rsi_14")
+
+            if rsi is None:
+                continue
+
+            rsi = float(rsi)
+
+            if not 0 <= rsi <= 100:
+                continue
+
+            if rsi < exit_rsi:
+                continue
+
+            quantity = int(holding["quantity"])
+
+            if quantity <= 0:
+                continue
+
+            decisions.append(
+                AgentTradeDecision(
+                    symbol=symbol,
+                    action="sell",
+                    quantity=quantity,
+                    confidence=0.90,
+                    rationale=(
+                        f"Mean-reversion exit condition triggered: "
+                        f"RSI14 recovered to {rsi:.2f}, reaching or "
+                        f"exceeding the exit threshold of {exit_rsi:.2f}. "
+                        "Selling the entire existing position."
+                    ),
+                )
+            )
+
+        # --------------------------------------------------
+        # 2. Evaluate new BUY opportunities.
+        # --------------------------------------------------
+
+        if initial_cash <= 0 or available_cash <= 0:
+            return AgentDecision(
+                as_of_date=as_of_date,
+                summary=(
+                    f"Generated {len(decisions)} sell decisions. "
+                    "No available cash for new mean-reversion investments."
+                ),
+                decisions=decisions,
+            )
+
+        existing_holdings = set(holdings.keys())
 
         candidates = []
 
@@ -146,12 +223,14 @@ class MeanReversionStrategy(TradingStrategy):
             if latest_price >= sma_20:
                 continue
 
-            candidates.append({
-                "symbol": symbol,
-                "latest_price": latest_price,
-                "rsi": rsi,
-                "momentum": momentum,
-            })
+            candidates.append(
+                {
+                    "symbol": symbol,
+                    "latest_price": latest_price,
+                    "rsi": rsi,
+                    "momentum": momentum,
+                }
+            )
 
         # Lowest RSI first: most oversold candidates are considered first.
         candidates.sort(
@@ -164,9 +243,10 @@ class MeanReversionStrategy(TradingStrategy):
             return AgentDecision(
                 as_of_date=as_of_date,
                 summary=(
+                    f"Generated {len(decisions)} sell decisions. "
                     "No stocks met the mean-reversion entry conditions."
                 ),
-                decisions=[],
+                decisions=decisions,
             )
 
         total_budget = min(
@@ -174,11 +254,7 @@ class MeanReversionStrategy(TradingStrategy):
             available_cash / self.ORDER_RESERVATION_BUFFER,
         )
 
-        target_per_stock = (
-            total_budget / len(selected_candidates)
-        )
-
-        decisions = []
+        target_per_stock = total_budget / len(selected_candidates)
 
         for candidate in selected_candidates:
 
@@ -218,14 +294,22 @@ class MeanReversionStrategy(TradingStrategy):
                 )
             )
 
-        summary = (
-            f"Identified {len(candidates)} mean-reversion candidates "
-            f"and generated {len(decisions)} buy decisions from the "
-            f"lowest-RSI candidates."
+        buy_count = sum(
+            decision.action == "buy"
+            for decision in decisions
+        )
+
+        sell_count = sum(
+            decision.action == "sell"
+            for decision in decisions
         )
 
         return AgentDecision(
             as_of_date=as_of_date,
-            summary=summary,
+            summary=(
+                f"Generated {sell_count} sell decisions and "
+                f"{buy_count} buy decisions. "
+                f"Identified {len(candidates)} mean-reversion candidates."
+            ),
             decisions=decisions,
         )

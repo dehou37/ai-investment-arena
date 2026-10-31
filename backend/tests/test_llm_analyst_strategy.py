@@ -234,3 +234,101 @@ def test_rejects_invalid_llm_json():
 
     with pytest.raises(LLMStrategyError, match="invalid decision"):
         strategy.generate_decision(build_market_context())
+
+def test_generates_valid_sell_decision():
+    context = build_market_context()
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "NVDA",
+            "quantity": 5,
+            "average_entry_price": 190.0,
+        }
+    ]
+
+    decisions = [
+        {
+            "symbol": "NVDA",
+            "action": "sell",
+            "quantity": 3,
+            "confidence": 0.9,
+            "rationale": "Reducing exposure after weakening momentum.",
+        }
+    ]
+
+    client = FakeOllamaClient(make_response(decisions))
+    strategy = LLMAnalystStrategy(ollama_client=client)
+
+    result = strategy.generate_decision(context)
+
+    assert len(result.decisions) == 1
+    assert result.decisions[0].action == "sell"
+    assert result.decisions[0].quantity == 3
+
+
+def test_rejects_selling_stock_not_held():
+    context = build_market_context()
+
+    decisions = [
+        {
+            "symbol": "NVDA",
+            "action": "sell",
+            "quantity": 1,
+            "confidence": 0.9,
+            "rationale": "Taking profits.",
+        }
+    ]
+
+    client = FakeOllamaClient(make_response(decisions))
+    strategy = LLMAnalystStrategy(ollama_client=client)
+
+    with pytest.raises(LLMStrategyError):
+        strategy.generate_decision(context)
+
+
+def test_allows_hold_decision_for_stale_stock():
+    context = build_market_context()
+    context["universe"]["stocks"][0]["data_status"] = "stale_or_missing"
+
+    decisions = [
+        {
+            "symbol": "NVDA",
+            "action": "hold",
+            "quantity": None,
+            "confidence": 0.8,
+            "rationale": "Retain the existing position while awaiting fresh data.",
+        }
+    ]
+
+    client = FakeOllamaClient(make_response(decisions))
+    strategy = LLMAnalystStrategy(ollama_client=client)
+
+    result = strategy.generate_decision(context)
+
+    assert result.decisions[0].action == "hold"
+
+
+def test_rejects_sell_quantity_of_zero():
+    context = build_market_context()
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "NVDA",
+            "quantity": 5,
+            "average_entry_price": 190.0,
+        }
+    ]
+
+    decisions = [
+        {
+            "symbol": "NVDA",
+            "action": "sell",
+            "quantity": 0,
+            "confidence": 0.9,
+            "rationale": "Reducing exposure.",
+        }
+    ]
+
+    client = FakeOllamaClient(make_response(decisions))
+    strategy = LLMAnalystStrategy(ollama_client=client)
+
+    with pytest.raises(LLMStrategyError):
+        strategy.generate_decision(context)

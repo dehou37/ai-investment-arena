@@ -94,7 +94,7 @@ def get_competition_query():
 
 # ---------------------------------------------------------
 # POST /api/competitions
-# Create a competition with five agents and portfolios
+# Create a competition with six agents and portfolios
 # ---------------------------------------------------------
 
 @router.post(

@@ -222,9 +222,12 @@ class LLMAnalystStrategy(TradingStrategy):
                     f"{decision.symbol}"
                 )
 
-            if stock["data_status"] != "current":
+            if (
+                decision.action in {"buy", "sell"}
+                and stock["data_status"] != "current"
+            ):
                 raise LLMStrategyError(
-                    f"LLM recommended a stock with stale or missing "
+                    f"LLM recommended a trade for a stock with stale or missing "
                     f"data: {decision.symbol}"
                 )
 

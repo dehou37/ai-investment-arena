@@ -160,3 +160,54 @@ def test_invalid_allocation_fraction_is_rejected():
 
     with pytest.raises(ValueError):
         strategy.generate_decision(context)
+
+
+def test_never_generates_sell_decisions():
+    strategy = BuyAndHoldStrategy()
+    context = create_test_context()
+
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "AAPL",
+            "quantity": 10,
+            "average_entry_price": 100.0,
+        },
+        {
+            "symbol": "MSFT",
+            "quantity": 5,
+            "average_entry_price": 200.0,
+        },
+    ]
+
+    result = strategy.generate_decision(context)
+
+    sell_decisions = [
+        decision
+        for decision in result.decisions
+        if decision.action == "sell"
+    ]
+
+    assert sell_decisions == []
+
+
+def test_does_not_sell_even_when_holding_is_unprofitable():
+    strategy = BuyAndHoldStrategy()
+    context = create_test_context()
+
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "AAPL",
+            "quantity": 10,
+            "average_entry_price": 150.0,
+        }
+    ]
+
+    result = strategy.generate_decision(context)
+
+    sell_decisions = [
+        decision
+        for decision in result.decisions
+        if decision.action == "sell"
+    ]
+
+    assert sell_decisions == []

@@ -18,13 +18,18 @@ class RiskManagedStrategy(TradingStrategy):
     - Positive 20-day momentum.
     - Annualized 20-day volatility below the configured maximum.
 
-    Candidates are ranked by lowest volatility first.
+    Exit conditions:
+    - Price falls below SMA20.
+    - SMA20 falls below SMA50.
+    - Annualized 20-day volatility exceeds the configured maximum.
 
     Capital controls:
     - Uses a conservative fraction of initial capital.
-    - Limits each position to a fraction of initial capital.
+    - Limits each new position to a fraction of initial capital.
     - Reserves a buying-power buffer.
     - Buys whole shares only.
+
+    The strategy does not submit or execute orders.
     """
 
     strategy_type = "risk_managed"
@@ -64,7 +69,7 @@ class RiskManagedStrategy(TradingStrategy):
         max_position_fraction = float(
             config.get(
                 "max_position_fraction",
-                self.DEFAULT_MAX_POSITION_FRACTION,
+            self.DEFAULT_MAX_POSITION_FRACTION,
             )
         )
 
@@ -116,18 +121,126 @@ class RiskManagedStrategy(TradingStrategy):
                 "max_new_positions must be a positive integer."
             )
 
-        if initial_cash <= 0 or available_cash <= 0:
-            return AgentDecision(
-                as_of_date=as_of_date,
-                summary="No available cash for risk-managed investments.",
-                decisions=[],
-            )
-
-        existing_holdings = {
-            holding["symbol"].upper()
+        holdings = {
+            holding["symbol"].upper(): holding
             for holding in portfolio["holdings"]
             if holding["quantity"] > 0
         }
+
+        stock_by_symbol = {
+            stock["symbol"].upper(): stock
+            for stock in universe["stocks"]
+        }
+
+        decisions = []
+
+        # --------------------------------------------------
+        # 1. Evaluate existing positions for exit conditions.
+        # --------------------------------------------------
+
+        for symbol, holding in holdings.items():
+
+            stock = stock_by_symbol.get(symbol)
+
+            if stock is None or stock.get("data_status") != "current":
+                continue
+
+            latest_price = stock.get("latest_price")
+            indicators = stock.get("indicators") or {}
+
+            sma_20 = indicators.get("sma_20")
+            sma_50 = indicators.get("sma_50")
+            volatility = indicators.get("volatility_20d")
+
+            if any(
+                value is None
+                for value in (
+                    latest_price,
+                    sma_20,
+                    sma_50,
+                    volatility,
+                )
+            ):
+                continue
+
+            latest_price = float(latest_price)
+            sma_20 = float(sma_20)
+            sma_50 = float(sma_50)
+            volatility = float(volatility)
+
+            if not all(
+                isfinite(value)
+                for value in (
+                    latest_price,
+                    sma_20,
+                    sma_50,
+                    volatility,
+                )
+            ):
+                continue
+
+            if latest_price <= 0 or sma_20 <= 0 or sma_50 <= 0:
+                continue
+
+            if volatility < 0:
+                continue
+
+            exit_reasons = []
+
+            if latest_price < sma_20:
+                exit_reasons.append(
+                    "price fell below SMA20"
+                )
+
+            if sma_20 < sma_50:
+                exit_reasons.append(
+                    "SMA20 fell below SMA50"
+                )
+
+            if volatility > max_volatility:
+                exit_reasons.append(
+                    f"annualized 20-day volatility reached "
+                    f"{volatility:.2%}, exceeding the "
+                    f"{max_volatility:.2%} limit"
+                )
+
+            if not exit_reasons:
+                continue
+
+            quantity = int(holding["quantity"])
+
+            if quantity <= 0:
+                continue
+
+            decisions.append(
+                AgentTradeDecision(
+                    symbol=symbol,
+                    action="sell",
+                    quantity=quantity,
+                    confidence=0.95,
+                    rationale=(
+                        "Guardian risk exit triggered: "
+                        + "; ".join(exit_reasons)
+                        + ". Selling the entire existing position."
+                    ),
+                )
+            )
+
+        # --------------------------------------------------
+        # 2. Evaluate new BUY opportunities.
+        # --------------------------------------------------
+
+        if initial_cash <= 0 or available_cash <= 0:
+            return AgentDecision(
+                as_of_date=as_of_date,
+                summary=(
+                    f"Generated {len(decisions)} sell decisions. "
+                    "No available cash for new risk-managed investments."
+                ),
+                decisions=decisions,
+            )
+
+        existing_holdings = set(holdings.keys())
 
         candidates = []
 
@@ -183,7 +296,6 @@ class RiskManagedStrategy(TradingStrategy):
             if volatility < 0:
                 continue
 
-            # Require a positive trend.
             if latest_price <= sma_20:
                 continue
 
@@ -193,18 +305,18 @@ class RiskManagedStrategy(TradingStrategy):
             if momentum <= min_momentum:
                 continue
 
-            # Avoid stocks with excessive historical volatility.
             if volatility > max_volatility:
                 continue
 
-            candidates.append({
-                "symbol": symbol,
-                "latest_price": latest_price,
-                "momentum": momentum,
-                "volatility": volatility,
-            })
+            candidates.append(
+                {
+                    "symbol": symbol,
+                    "latest_price": latest_price,
+                    "momentum": momentum,
+                    "volatility": volatility,
+                }
+            )
 
-        # Prefer the least volatile eligible stocks.
         candidates.sort(
             key=lambda item: (
                 item["volatility"],
@@ -218,9 +330,10 @@ class RiskManagedStrategy(TradingStrategy):
             return AgentDecision(
                 as_of_date=as_of_date,
                 summary=(
+                    f"Generated {len(decisions)} sell decisions. "
                     "No stocks met Guardian's trend and risk conditions."
                 ),
-                decisions=[],
+                decisions=decisions,
             )
 
         total_budget = min(
@@ -235,8 +348,6 @@ class RiskManagedStrategy(TradingStrategy):
         max_position_budget = (
             initial_cash * max_position_fraction
         )
-
-        decisions = []
 
         for candidate in selected_candidates:
 
@@ -285,11 +396,22 @@ class RiskManagedStrategy(TradingStrategy):
                 )
             )
 
+        buy_count = sum(
+            decision.action == "buy"
+            for decision in decisions
+        )
+
+        sell_count = sum(
+            decision.action == "sell"
+            for decision in decisions
+        )
+
         return AgentDecision(
             as_of_date=as_of_date,
             summary=(
-                f"Evaluated {len(candidates)} eligible low-volatility "
-                f"stocks and generated {len(decisions)} buy decisions."
+                f"Generated {sell_count} sell decisions and "
+                f"{buy_count} buy decisions after evaluating "
+                f"{len(candidates)} eligible low-volatility stocks."
             ),
             decisions=decisions,
         )

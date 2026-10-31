@@ -330,3 +330,129 @@ def test_invalid_maximum_positions_is_rejected():
 
     with pytest.raises(ValueError):
         strategy.generate_decision(context)
+
+
+def test_sells_when_price_falls_below_sma20():
+    strategy = RiskManagedStrategy()
+    context = create_test_context()
+
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "NVDA",
+            "quantity": 5,
+            "average_entry_price": 120.0,
+        }
+    ]
+
+    context["universe"]["stocks"][0]["latest_price"] = 100.0
+
+    result = strategy.generate_decision(context)
+
+    sell_decisions = [
+        decision for decision in result.decisions
+        if decision.action == "sell"
+    ]
+
+    assert len(sell_decisions) == 1
+    assert sell_decisions[0].symbol == "NVDA"
+    assert sell_decisions[0].quantity == 5
+
+
+def test_sells_when_sma20_falls_below_sma50():
+    strategy = RiskManagedStrategy()
+    context = create_test_context()
+
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "NVDA",
+            "quantity": 5,
+            "average_entry_price": 120.0,
+        }
+    ]
+
+    context["universe"]["stocks"][0]["indicators"]["sma_20"] = 95.0
+
+    result = strategy.generate_decision(context)
+
+    sell_decisions = [
+        decision for decision in result.decisions
+        if decision.action == "sell"
+    ]
+
+    assert len(sell_decisions) == 1
+    assert sell_decisions[0].symbol == "NVDA"
+    assert sell_decisions[0].quantity == 5
+
+
+def test_sells_when_volatility_exceeds_configured_maximum():
+    strategy = RiskManagedStrategy()
+    context = create_test_context()
+
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "NVDA",
+            "quantity": 5,
+            "average_entry_price": 120.0,
+        }
+    ]
+
+    context["universe"]["stocks"][0]["indicators"][
+        "volatility_20d"
+    ] = 0.50
+
+    result = strategy.generate_decision(context)
+
+    sell_decisions = [
+        decision for decision in result.decisions
+        if decision.action == "sell"
+    ]
+
+    assert len(sell_decisions) == 1
+    assert sell_decisions[0].symbol == "NVDA"
+    assert sell_decisions[0].quantity == 5
+
+
+def test_does_not_sell_when_all_risk_conditions_are_healthy():
+    strategy = RiskManagedStrategy()
+    context = create_test_context()
+
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "NVDA",
+            "quantity": 5,
+            "average_entry_price": 120.0,
+        }
+    ]
+
+    result = strategy.generate_decision(context)
+
+    sell_decisions = [
+        decision for decision in result.decisions
+        if decision.action == "sell"
+    ]
+
+    assert sell_decisions == []
+
+
+def test_can_generate_sell_decisions_without_available_cash():
+    strategy = RiskManagedStrategy()
+    context = create_test_context()
+
+    context["portfolio"]["cash_balance"] = 0.0
+
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "NVDA",
+            "quantity": 5,
+            "average_entry_price": 120.0,
+        }
+    ]
+
+    context["universe"]["stocks"][0]["latest_price"] = 100.0
+
+    result = strategy.generate_decision(context)
+
+    assert len(result.decisions) == 1
+    assert result.decisions[0].symbol == "NVDA"
+    assert result.decisions[0].action == "sell"
+    assert result.decisions[0].quantity == 5

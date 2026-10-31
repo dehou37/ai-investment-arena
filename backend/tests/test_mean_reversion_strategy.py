@@ -244,3 +244,130 @@ def test_invalid_maximum_positions_is_rejected():
 
     with pytest.raises(ValueError):
         strategy.generate_decision(context)
+
+
+def test_sells_entire_position_when_rsi_reaches_exit_threshold():
+    strategy = MeanReversionStrategy()
+    context = create_test_context()
+
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "NVDA",
+            "quantity": 5,
+            "average_entry_price": 100.0,
+        }
+    ]
+
+    context["universe"]["stocks"][0]["indicators"]["rsi_14"] = 65.0
+
+    result = strategy.generate_decision(context)
+
+    sell_decisions = [
+        decision for decision in result.decisions
+        if decision.action == "sell"
+    ]
+
+    assert len(sell_decisions) == 1
+    assert sell_decisions[0].symbol == "NVDA"
+    assert sell_decisions[0].quantity == 5
+
+
+def test_custom_exit_rsi_threshold_is_respected():
+    strategy = MeanReversionStrategy()
+    context = create_test_context()
+
+    context["agent"]["config"] = {
+        "exit_rsi": 55.0,
+    }
+
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "NVDA",
+            "quantity": 5,
+            "average_entry_price": 100.0,
+        }
+    ]
+
+    context["universe"]["stocks"][0]["indicators"]["rsi_14"] = 57.0
+
+    result = strategy.generate_decision(context)
+
+    sell_decisions = [
+        decision for decision in result.decisions
+        if decision.action == "sell"
+    ]
+
+    assert len(sell_decisions) == 1
+    assert sell_decisions[0].quantity == 5
+
+
+def test_does_not_sell_when_rsi_is_below_exit_threshold():
+    strategy = MeanReversionStrategy()
+    context = create_test_context()
+
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "NVDA",
+            "quantity": 5,
+            "average_entry_price": 100.0,
+        }
+    ]
+
+    context["universe"]["stocks"][0]["indicators"]["rsi_14"] = 45.0
+
+    result = strategy.generate_decision(context)
+
+    sell_decisions = [
+        decision for decision in result.decisions
+        if decision.action == "sell"
+    ]
+
+    assert sell_decisions == []
+
+
+def test_does_not_sell_holding_with_stale_market_data():
+    strategy = MeanReversionStrategy()
+    context = create_test_context()
+
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "INTC",
+            "quantity": 10,
+            "average_entry_price": 50.0,
+        }
+    ]
+
+    context["universe"]["stocks"][3]["indicators"]["rsi_14"] = 75.0
+
+    result = strategy.generate_decision(context)
+
+    sell_decisions = [
+        decision for decision in result.decisions
+        if decision.action == "sell"
+    ]
+
+    assert sell_decisions == []
+
+
+def test_can_generate_sell_decisions_without_available_cash():
+    strategy = MeanReversionStrategy()
+    context = create_test_context()
+
+    context["portfolio"]["cash_balance"] = 0.0
+
+    context["portfolio"]["holdings"] = [
+        {
+            "symbol": "NVDA",
+            "quantity": 5,
+            "average_entry_price": 100.0,
+        }
+    ]
+
+    context["universe"]["stocks"][0]["indicators"]["rsi_14"] = 65.0
+
+    result = strategy.generate_decision(context)
+
+    assert len(result.decisions) == 1
+    assert result.decisions[0].symbol == "NVDA"
+    assert result.decisions[0].action == "sell"
+    assert result.decisions[0].quantity == 5
