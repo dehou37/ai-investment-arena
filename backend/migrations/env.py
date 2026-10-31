@@ -15,6 +15,7 @@ from app.models import (
     Position,
     Order,
     Execution,
+    PortfolioSnapshot,
 )
 
 
