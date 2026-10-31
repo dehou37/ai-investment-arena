@@ -20,6 +20,9 @@ from app.models.stock_bar import StockBar
 from app.models.stock_universe_membership import StockUniverseMembership
 from app.models.stock_universe_snapshot import StockUniverseSnapshot
 
+from math import sqrt
+from statistics import stdev
+
 
 HISTORY_LIMIT = 60
 DAILY_TIMEFRAME = "1Day"
@@ -144,6 +147,37 @@ def _calculate_momentum(
     return (latest_close / previous_close) - 1.0
 
 
+def _calculate_annualized_volatility(
+    closes: list[float],
+    period: int = 20,
+) -> float | None:
+    """
+    Calculate annualized historical volatility from daily close returns.
+
+    Requires period + 1 closing prices to calculate period daily returns.
+    Returns None when insufficient or invalid data is available.
+    """
+    if len(closes) < period + 1:
+        return None
+
+    recent_closes = closes[-(period + 1):]
+
+    if any(
+        close is None or close <= 0
+        for close in recent_closes
+    ):
+        return None
+
+    daily_returns = [
+        (recent_closes[index] / recent_closes[index - 1]) - 1
+        for index in range(1, len(recent_closes))
+    ]
+
+    if len(daily_returns) < 2:
+        return None
+
+    return stdev(daily_returns) * sqrt(252)
+
 def _get_historical_bars(
     db: Session,
     stock_id: UUID,
@@ -246,6 +280,7 @@ def _build_stock_context(
             "sma_50": _calculate_sma(closes, 50),
             "rsi_14": _calculate_rsi(closes, 14),
             "momentum_20d": _calculate_momentum(closes, 20),
+            "volatility_20d": _calculate_annualized_volatility(closes, 20),
         },
         "history": history,
     }
