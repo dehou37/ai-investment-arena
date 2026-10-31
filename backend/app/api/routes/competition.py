@@ -65,6 +65,14 @@ INITIAL_AGENTS = [
             "Prioritizes risk management and capital preservation."
         ),
     },
+     {
+        "name": "AI Analyst",
+        "strategy_type": "llm_analyst",
+        "description": (
+            "Uses a local large language model to analyse market conditions "
+            "and generate independent trading decisions."
+        ),
+    },
 ]
 
 

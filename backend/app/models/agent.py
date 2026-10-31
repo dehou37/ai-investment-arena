@@ -73,7 +73,7 @@ class Agent(Base):
         CheckConstraint(
             "strategy_type IN "
             "('buy_and_hold', 'momentum', 'mean_reversion', "
-            "'value', 'risk_managed')",
+            "'value', 'risk_managed', 'llm_analyst')",
             name="ck_agent_strategy_type",
         ),
         CheckConstraint(
