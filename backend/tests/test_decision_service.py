@@ -10,6 +10,7 @@ from app.services.trading.decision_service import (
     DecisionOrchestrationError,
     DecisionOrchestrator,
 )
+from app.services.trading.risk_service import RiskValidationError
 
 
 @pytest.fixture
@@ -29,7 +30,22 @@ def market_context():
             "id": str(uuid4()),
             "name": "Momentum",
             "strategy_type": "momentum",
-        }
+        },
+        "as_of_date": "2026-10-30",
+        "portfolio": {
+            "cash_balance": "10000",
+            "holdings": [],
+        },
+        "universe": {
+            "stocks": [],
+        },
+        "trading_constraints": {
+            "long_only": True,
+            "whole_shares_only": True,
+            "fractional_shares_allowed": False,
+            "margin_allowed": False,
+            "short_selling_allowed": False,
+        },
     }
 
 
@@ -99,13 +115,15 @@ def test_llm_analyst_receives_shared_ollama_client(
     monkeypatch,
     orchestrator,
     ollama_client,
+    market_context,
 ):
     from app.services.trading import decision_service
 
     context = {
+        **market_context,
         "agent": {
             "strategy_type": "llm_analyst",
-        }
+        },
     }
 
     expected_decision = AgentDecision(
@@ -168,3 +186,113 @@ def test_context_builder_failure_is_wrapped(
             agent_id=uuid4(),
             as_of_date=date(2026, 10, 30),
         )
+
+
+def test_risk_validation_failure_rejects_decision(
+    monkeypatch,
+    orchestrator,
+    market_context,
+):
+    from app.services.trading import decision_service
+
+    expected_decision = AgentDecision(
+        as_of_date="2026-10-30",
+        summary="Unsafe trading decision.",
+        decisions=[],
+    )
+
+    strategy = Mock()
+    strategy.generate_decision.return_value = expected_decision
+
+    monkeypatch.setattr(
+        decision_service,
+        "build_agent_market_context",
+        Mock(return_value=market_context),
+    )
+
+    monkeypatch.setattr(
+        decision_service.StrategyRegistry,
+        "get",
+        Mock(return_value=strategy),
+    )
+
+    validator = Mock(
+        side_effect=RiskValidationError(
+            "Total invested exposure exceeds 95%."
+        )
+    )
+
+    monkeypatch.setattr(
+        decision_service,
+        "validate_agent_decision",
+        validator,
+    )
+
+    with pytest.raises(
+        RiskValidationError,
+        match="Total invested exposure",
+    ):
+        orchestrator.generate_agent_decision(
+            db=Mock(),
+            competition_id=uuid4(),
+            agent_id=uuid4(),
+            as_of_date=date(2026, 10, 30),
+        )
+
+    validator.assert_called_once_with(
+        decision=expected_decision,
+        context=market_context,
+    )
+
+
+def test_risk_validation_runs_after_strategy_generation(
+    monkeypatch,
+    orchestrator,
+    market_context,
+):
+    from app.services.trading import decision_service
+
+    expected_decision = AgentDecision(
+        as_of_date="2026-10-30",
+        summary="Safe trading decision.",
+        decisions=[],
+    )
+
+    strategy = Mock()
+    strategy.generate_decision.return_value = expected_decision
+
+    monkeypatch.setattr(
+        decision_service,
+        "build_agent_market_context",
+        Mock(return_value=market_context),
+    )
+
+    monkeypatch.setattr(
+        decision_service.StrategyRegistry,
+        "get",
+        Mock(return_value=strategy),
+    )
+
+    validator = Mock()
+
+    monkeypatch.setattr(
+        decision_service,
+        "validate_agent_decision",
+        validator,
+    )
+
+    result = orchestrator.generate_agent_decision(
+        db=Mock(),
+        competition_id=uuid4(),
+        agent_id=uuid4(),
+        as_of_date=date(2026, 10, 30),
+    )
+
+    assert result == expected_decision
+
+    strategy.generate_decision.assert_called_once_with(market_context)
+
+    validator.assert_called_once_with(
+        decision=expected_decision,
+        context=market_context,
+    )
