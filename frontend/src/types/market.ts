@@ -11,11 +11,11 @@ export interface Stock {
 export interface StockBar {
   timestamp: string;
   timeframe: string;
-  open: number | string;
-  high: number | string;
-  low: number | string;
-  close: number | string;
-  volume: number | string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
   provider: string;
   feed: string;
   adjustment: string;

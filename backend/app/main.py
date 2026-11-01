@@ -31,7 +31,7 @@ from app.services.trading.market_session_monitor_service import (
 from app.services.trading.scheduler_service import (
     DailyTradingSchedulerService,
 )
-
+from app.api.routes.activity import router as activity_router
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +178,7 @@ app.include_router(competitions_router)
 app.include_router(orders_router)
 app.include_router(portfolio.router)
 app.include_router(snapshots.router)
+app.include_router(activity_router)
 
 
 @app.get("/")

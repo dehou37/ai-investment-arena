@@ -6,6 +6,7 @@ import type { Stock, StockBar } from "./types/market";
 import StockChart from "./components/StockChart";
 
 import "./App.css";
+import AgentDashboard from "./components/AgentDashboard";
 
 function App() {
   const [stocks, setStocks] = useState<Stock[]>([]);
@@ -14,7 +15,9 @@ function App() {
   const [loadingStocks, setLoadingStocks] = useState(true);
   const [loadingBars, setLoadingBars] = useState(false);
   const [error, setError] = useState("");
-
+  const [activePage, setActivePage] = useState<
+    "market" | "agents" | "leaderboard"
+  >("market");
   useEffect(() => {
     async function loadStocks() {
       try {
@@ -118,10 +121,33 @@ function App() {
         </div>
 
         <nav>
-          <div className="nav-item active">Market Overview</div>
-          <div className="nav-item disabled">AI Agents</div>
-          <div className="nav-item disabled">Leaderboard</div>
-          <div className="nav-item disabled">Portfolio</div>
+          <button
+            className={`nav-item ${activePage === "market" ? "active" : ""}`}
+            onClick={() => setActivePage("market")}
+          >
+            Market Overview
+          </button>
+
+          <button
+            className={`nav-item ${activePage === "agents" ? "active" : ""}`}
+            onClick={() => setActivePage("agents")}
+          >
+            AI Agents
+          </button>
+
+          <button
+            className={`nav-item ${activePage === "leaderboard" ? "active" : ""}`}
+            onClick={() => setActivePage("leaderboard")}
+          >
+            Leaderboard
+          </button>
+
+          <button
+            className={`nav-item ${activePage === "agents" ? "active" : ""}`}
+            onClick={() => setActivePage("agents")}
+          >
+            Portfolios
+          </button>
         </nav>
 
         <div className="sidebar-footer">
@@ -133,12 +159,26 @@ function App() {
       <main className="main">
         <header className="topbar">
           <div>
-            <h1>Market Overview</h1>
-            <p>Monitor your tracked US stocks.</p>
+            <h1>
+              {activePage === "market"
+                ? "Market Overview"
+                : activePage === "agents"
+                  ? "AI Agents"
+                  : "Leaderboard"}
+            </h1>
+            <p>
+              {activePage === "market"
+                ? "Monitor your tracked US stocks."
+                : activePage === "agents"
+                  ? "Monitor your AI trading agents and their portfolios."
+                  : "Compare agent performance in the competition."}
+            </p>
           </div>
           <div className="feed-badge">ALPACA · IEX FEED</div>
         </header>
 
+        {activePage === "market" ? (
+        <>
         {error && <div className="error">{error}</div>}
 
         <section className="summary-grid">
@@ -286,6 +326,12 @@ function App() {
           AI Investment Arena · Paper trading simulation · Market data
           provided by Alpaca
         </footer>
+          </>
+          ) : (
+            <AgentDashboard
+              mode={activePage === "agents" ? "agents" : "leaderboard"}
+            />
+          )}
       </main>
     </div>
   );
