@@ -2,10 +2,13 @@
 from datetime import date
 from unittest.mock import Mock
 from uuid import uuid4
-
+from fastapi import HTTPException
 import pytest
 
-from app.schemas.agent_decision import AgentDecision
+from app.schemas.agent_decision import (
+    AgentDecision,
+    AgentTradeDecision,
+)
 from app.services.trading.decision_service import (
     DecisionOrchestrationError,
     DecisionOrchestrator,
@@ -296,3 +299,226 @@ def test_risk_validation_runs_after_strategy_generation(
         decision=expected_decision,
         context=market_context,
     )
+
+def test_generate_and_submit_converts_buy_sell_and_ignores_hold(
+    monkeypatch,
+    orchestrator,
+):
+    from app.services.trading import decision_service
+
+    decision = AgentDecision(
+        as_of_date="2026-10-30",
+        summary="Three decisions: two trades and one hold.",
+        decisions=[
+            AgentTradeDecision(
+                symbol="NVDA",
+                action="buy",
+                quantity=2,
+                confidence=0.9,
+                rationale="Positive momentum.",
+            ),
+            AgentTradeDecision(
+                symbol="AAPL",
+                action="sell",
+                quantity=1,
+                confidence=0.8,
+                rationale="Trend reversal.",
+            ),
+            AgentTradeDecision(
+                symbol="MSFT",
+                action="hold",
+                confidence=0.7,
+                rationale="No clear signal.",
+            ),
+        ],
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "generate_agent_decision",
+        Mock(return_value=decision),
+    )
+
+    created_orders = [Mock(), Mock()]
+    submit_batch = Mock(return_value=created_orders)
+
+    monkeypatch.setattr(
+        decision_service,
+        "submit_order_batch",
+        submit_batch,
+    )
+
+    db = Mock()
+    competition_id = uuid4()
+    agent_id = uuid4()
+    as_of_date = date(2026, 10, 30)
+
+    result_decision, result_orders = (
+        orchestrator.generate_and_submit_agent_orders(
+            db=db,
+            competition_id=competition_id,
+            agent_id=agent_id,
+            as_of_date=as_of_date,
+        )
+    )
+
+    assert result_decision == decision
+    assert result_orders == created_orders
+
+    submit_batch.assert_called_once()
+
+    call_kwargs = submit_batch.call_args.kwargs
+
+    assert call_kwargs["db"] is db
+    assert call_kwargs["competition_id"] == competition_id
+    assert call_kwargs["agent_id"] == agent_id
+
+    orders = call_kwargs["orders"]
+
+    assert len(orders) == 2
+
+    assert orders[0].stock_symbol == "NVDA"
+    assert orders[0].side == "buy"
+    assert orders[0].order_type == "market"
+    assert orders[0].quantity == 2
+
+    assert orders[1].stock_symbol == "AAPL"
+    assert orders[1].side == "sell"
+    assert orders[1].order_type == "market"
+    assert orders[1].quantity == 1
+
+
+def test_generate_and_submit_returns_empty_list_for_hold_only(
+    monkeypatch,
+    orchestrator,
+):
+    from app.services.trading import decision_service
+
+    decision = AgentDecision(
+        as_of_date="2026-10-30",
+        summary="No trades are necessary.",
+        decisions=[
+            AgentTradeDecision(
+                symbol="NVDA",
+                action="hold",
+                confidence=0.9,
+                rationale="Maintain current position.",
+            ),
+        ],
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "generate_agent_decision",
+        Mock(return_value=decision),
+    )
+
+    submit_batch = Mock()
+
+    monkeypatch.setattr(
+        decision_service,
+        "submit_order_batch",
+        submit_batch,
+    )
+
+    result_decision, result_orders = (
+        orchestrator.generate_and_submit_agent_orders(
+            db=Mock(),
+            competition_id=uuid4(),
+            agent_id=uuid4(),
+            as_of_date=date(2026, 10, 30),
+        )
+    )
+
+    assert result_decision == decision
+    assert result_orders == []
+    submit_batch.assert_not_called()
+
+
+def test_generate_and_submit_returns_empty_list_for_no_decisions(
+    monkeypatch,
+    orchestrator,
+):
+    from app.services.trading import decision_service
+
+    decision = AgentDecision(
+        as_of_date="2026-10-30",
+        summary="No trading signals were generated.",
+        decisions=[],
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "generate_agent_decision",
+        Mock(return_value=decision),
+    )
+
+    submit_batch = Mock()
+
+    monkeypatch.setattr(
+        decision_service,
+        "submit_order_batch",
+        submit_batch,
+    )
+
+    result_decision, result_orders = (
+        orchestrator.generate_and_submit_agent_orders(
+            db=Mock(),
+            competition_id=uuid4(),
+            agent_id=uuid4(),
+            as_of_date=date(2026, 10, 30),
+        )
+    )
+
+    assert result_decision == decision
+    assert result_orders == []
+    submit_batch.assert_not_called()
+
+
+def test_generate_and_submit_propagates_brokerage_failure(
+    monkeypatch,
+    orchestrator,
+):
+    from app.services.trading import decision_service
+
+    decision = AgentDecision(
+        as_of_date="2026-10-30",
+        summary="Buy NVIDIA.",
+        decisions=[
+            AgentTradeDecision(
+                symbol="NVDA",
+                action="buy",
+                quantity=2,
+                confidence=0.9,
+                rationale="Positive momentum.",
+            ),
+        ],
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "generate_agent_decision",
+        Mock(return_value=decision),
+    )
+
+    monkeypatch.setattr(
+        decision_service,
+        "submit_order_batch",
+        Mock(
+            side_effect=HTTPException(
+                status_code=400,
+                detail="Insufficient available cash.",
+            )
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        orchestrator.generate_and_submit_agent_orders(
+            db=Mock(),
+            competition_id=uuid4(),
+            agent_id=uuid4(),
+            as_of_date=date(2026, 10, 30),
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "Insufficient available cash."

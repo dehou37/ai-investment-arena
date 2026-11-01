@@ -12,7 +12,7 @@ from app.models.execution import Execution
 from app.models.stock_universe_snapshot import StockUniverseSnapshot
 from app.models.stock_universe_membership import StockUniverseMembership
 from app.models.portfolio_snapshot import PortfolioSnapshot
-
+from app.models.agent_daily_run import AgentDailyRun
 
 __all__ = [
     "Stock",

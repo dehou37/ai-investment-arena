@@ -12,6 +12,9 @@ from app.api.routes import snapshots
 
 from app.services.llm.ollama_client import OllamaClient
 from app.services.trading.decision_service import DecisionOrchestrator
+from app.services.trading.daily_trading_service import (
+    DailyTradingCoordinator,
+)
 
 
 @asynccontextmanager
@@ -23,11 +26,17 @@ async def lifespan(app: FastAPI):
     ollama_client = OllamaClient()
 
     try:
-        app.state.ollama_client = ollama_client
-
-        app.state.decision_orchestrator = DecisionOrchestrator(
+        decision_orchestrator = DecisionOrchestrator(
             ollama_client=ollama_client
         )
+
+        daily_trading_coordinator = DailyTradingCoordinator(
+            decision_orchestrator=decision_orchestrator
+        )
+
+        app.state.ollama_client = ollama_client
+        app.state.decision_orchestrator = decision_orchestrator
+        app.state.daily_trading_coordinator = daily_trading_coordinator
 
         yield
 

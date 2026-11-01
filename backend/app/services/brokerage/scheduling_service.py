@@ -9,6 +9,48 @@ from app.models import Agent, Competition, Order, Portfolio
 from app.services.trading.calendar_service import get_next_market_open
 
 
+def schedule_orders(
+    db: Session,
+    orders: list[Order],
+) -> list[Order]:
+    """
+    Schedule only the supplied pending orders.
+
+    Each order is assigned the next market open after
+    its submission timestamp.
+
+    This is intended for the autonomous trading coordinator,
+    which must not accidentally reschedule unrelated orders.
+    """
+
+    if not orders:
+        return []
+
+    try:
+        for order in orders:
+            if order.status != "pending":
+                raise ValueError(
+                    f"Order {order.id} is not pending and "
+                    "cannot be scheduled."
+                )
+
+            order.scheduled_execution_at = get_next_market_open(
+                order.submitted_at
+            )
+            order.status = "queued"
+
+        db.commit()
+
+        for order in orders:
+            db.refresh(order)
+
+        return orders
+
+    except Exception:
+        db.rollback()
+        raise
+
+
 def schedule_pending_orders(
     db: Session,
     competition_id: UUID,
@@ -18,6 +60,8 @@ def schedule_pending_orders(
 
     Each order is scheduled for the next market open after
     its submission timestamp.
+
+    This function is retained for the existing API endpoint.
     """
 
     competition = db.scalar(
@@ -56,23 +100,7 @@ def schedule_pending_orders(
         .with_for_update()
     ).all()
 
-    if not pending_orders:
-        return []
-
-    try:
-        for order in pending_orders:
-            order.scheduled_execution_at = get_next_market_open(
-                order.submitted_at
-            )
-            order.status = "queued"
-
-        db.commit()
-
-        for order in pending_orders:
-            db.refresh(order)
-
-        return pending_orders
-
-    except Exception:
-        db.rollback()
-        raise
+    return schedule_orders(
+        db=db,
+        orders=pending_orders,
+    )
