@@ -42,6 +42,18 @@ IMPORTANT RULES:
 14. Avoid unnecessary trading.
 15. Use only the supplied information. You cannot access live
     external market data.
+16. Never allocate more than 33% of current portfolio equity
+    to a single stock.
+17. Never allow total invested exposure to exceed 95% of
+    current portfolio equity.
+18. Calculate portfolio equity as available cash plus the
+    current market value of all existing holdings.
+19. Preserve a 5% buying-power buffer when estimating
+    the cost of new purchases.
+20. Do not assume that proceeds from proposed SELL decisions
+    are immediately available to fund BUY decisions.
+21. Prefer conservative position sizing. If uncertain about
+    the permitted quantity, recommend fewer shares or HOLD.
 
 For every decision:
 - BUY requires a positive whole-share quantity.
@@ -131,18 +143,6 @@ class LLMAnalystStrategy(TradingStrategy):
                     "indicators": indicators,
                 }
             )
-
-            {
-                "symbol": stock["symbol"],
-                "sector": stock.get("sector"),
-                "latest_price": stock.get("latest_price"),
-                "latest_bar_date": stock.get("latest_bar_date"),
-                "expected_latest_session_date": stock.get(
-                    "expected_latest_session_date"
-                ),
-                "data_status": stock.get("data_status"),
-                "indicators": stock.get("indicators", {}),
-            }
         
 
         benchmark = context.get("benchmark")

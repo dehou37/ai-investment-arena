@@ -27,7 +27,7 @@ from app.services.trading.calendar_service import (
     get_market_session_close,
     get_next_market_open,
 )
-
+from app.core.config import settings
 
 def get_session_bar(
     db: Session,
@@ -35,7 +35,8 @@ def get_session_bar(
 ):
     """
     Find the daily bar corresponding to the order's
-    scheduled execution session.
+    scheduled execution session, using the configured
+    Alpaca data source.
     """
 
     session_date = order.scheduled_execution_at.date()
@@ -44,13 +45,15 @@ def get_session_bar(
         select(StockBar)
         .where(
             StockBar.stock_id == order.stock_id,
-            StockBar.timeframe == DAILY_TIMEFRAME,
+            StockBar.timeframe == settings.ALPACA_TIMEFRAME,
+            StockBar.provider == settings.ALPACA_PROVIDER,
+            StockBar.feed == settings.ALPACA_FEED,
+            StockBar.adjustment == settings.ALPACA_ADJUSTMENT,
             func.date(StockBar.timestamp) == session_date,
         )
         .order_by(StockBar.timestamp.desc())
         .limit(1)
     )
-
 
 def calculate_fill_price(
     order: Order,

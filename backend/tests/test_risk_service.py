@@ -21,8 +21,11 @@ def make_context(
     holdings=None,
     stock_prices=None,
     stale_symbols=None,
+    open_orders=None,
 ):
     holdings = holdings or []
+    open_orders = open_orders or []
+
     stock_prices = stock_prices or {
         "NVDA": "100",
         "AAPL": "100",
@@ -30,6 +33,7 @@ def make_context(
         "GOOGL": "100",
         "AMZN": "100",
     }
+
     stale_symbols = stale_symbols or []
 
     stocks = []
@@ -50,6 +54,7 @@ def make_context(
         "portfolio": {
             "cash_balance": cash,
             "holdings": holdings,
+            "open_orders": open_orders,
         },
         "universe": {
             "stocks": stocks,
@@ -92,11 +97,11 @@ def test_accepts_buy_within_risk_limits():
     validate_agent_decision(decision, context)
 
 
-def test_rejects_single_stock_allocation_above_20_percent():
+def test_rejects_single_stock_allocation_above_33_percent():
     context = make_context()
 
     decision = make_decision(
-        trade("NVDA", "buy", 21),
+        trade("NVDA", "buy", 34),
     )
 
     with pytest.raises(
@@ -106,11 +111,11 @@ def test_rejects_single_stock_allocation_above_20_percent():
         validate_agent_decision(decision, context)
 
 
-def test_accepts_single_stock_allocation_at_exactly_20_percent():
+def test_accepts_single_stock_allocation_at_exactly_33_percent():
     context = make_context()
 
     decision = make_decision(
-        trade("NVDA", "buy", 20),
+        trade("NVDA", "buy", 33),
     )
 
     validate_agent_decision(decision, context)
@@ -267,5 +272,126 @@ def test_rejects_mismatched_decision_date():
     with pytest.raises(
         RiskValidationError,
         match="Decision date",
+    ):
+        validate_agent_decision(decision, context)
+
+
+# ---------------------------------------------------------
+# Outstanding order tests
+# ---------------------------------------------------------
+
+
+def test_outstanding_market_buy_uses_5_percent_buffer():
+    context = make_context(
+        open_orders=[
+            {
+                "symbol": "NVDA",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 32,
+                "remaining_quantity": 32,
+                "limit_price": None,
+                "status": "queued",
+            },
+        ],
+    )
+
+    decision = make_decision()
+
+    # 32 * 100 * 1.05 = 3,360 (33.6% of equity).
+    with pytest.raises(
+        RiskValidationError,
+        match="maximum allowed allocation",
+    ):
+        validate_agent_decision(decision, context)
+
+
+def test_outstanding_limit_buy_uses_limit_price():
+    context = make_context(
+        open_orders=[
+            {
+                "symbol": "NVDA",
+                "side": "buy",
+                "order_type": "limit",
+                "quantity": 33,
+                "remaining_quantity": 33,
+                "limit_price": "100",
+                "status": "queued",
+            },
+        ],
+    )
+
+    decision = make_decision()
+
+    # 33 * 100 = 3,300 (exactly 33% of equity).
+    validate_agent_decision(decision, context)
+
+
+def test_multiple_outstanding_buys_for_same_stock_are_combined():
+    context = make_context(
+        open_orders=[
+            {
+                "symbol": "NVDA",
+                "side": "buy",
+                "order_type": "limit",
+                "quantity": 17,
+                "remaining_quantity": 17,
+                "limit_price": "100",
+                "status": "queued",
+            },
+            {
+                "symbol": "NVDA",
+                "side": "buy",
+                "order_type": "limit",
+                "quantity": 17,
+                "remaining_quantity": 17,
+                "limit_price": "100",
+                "status": "pending",
+            },
+        ],
+    )
+
+    decision = make_decision()
+
+    # Combined exposure: 34 * 100 = 3,400 (34% of equity).
+    with pytest.raises(
+        RiskValidationError,
+        match="maximum allowed allocation",
+    ):
+        validate_agent_decision(decision, context)
+
+
+def test_outstanding_sell_does_not_reduce_projected_exposure():
+    context = make_context(
+        cash="6700",
+        holdings=[
+            {
+                "symbol": "NVDA",
+                "quantity": 33,
+                "average_entry_price": "100",
+            },
+        ],
+        open_orders=[
+            {
+                "symbol": "NVDA",
+                "side": "sell",
+                "order_type": "market",
+                "quantity": 2,
+                "remaining_quantity": 2,
+                "limit_price": None,
+                "status": "queued",
+            },
+        ],
+    )
+
+    decision = make_decision(
+        trade("NVDA", "buy", 1),
+    )
+
+    # The pending SELL is not executed, so projected holdings remain
+    # 34 shares after the proposed BUY: 34% of portfolio equity.
+    with pytest.raises(
+        RiskValidationError,
+        match="maximum allowed allocation",
     ):
         validate_agent_decision(decision, context)

@@ -25,6 +25,8 @@ class MeanReversionStrategy(TradingStrategy):
     - Sells the entire existing position when an exit condition is met.
     - Ranks new candidates by lowest RSI first.
     - Uses equal allocation across selected candidates.
+    - Maximum allocation per stock: 33% of portfolio equity.
+    - Maximum total invested exposure: 95% of portfolio equity.
     - Buys whole shares only.
     - Respects available buying power.
     - Does not submit or execute orders.
@@ -33,6 +35,8 @@ class MeanReversionStrategy(TradingStrategy):
     strategy_type = "mean_reversion"
 
     DEFAULT_ALLOCATION_FRACTION = 0.95
+    MAX_SINGLE_STOCK_ALLOCATION = 0.33
+    MAX_TOTAL_INVESTED_EXPOSURE = 0.95
     ORDER_RESERVATION_BUFFER = 1.05
     DEFAULT_MAX_RSI = 30.0
     DEFAULT_EXIT_RSI = 60.0
@@ -43,14 +47,12 @@ class MeanReversionStrategy(TradingStrategy):
         context: dict[str, Any],
     ) -> AgentDecision:
 
-        competition = context["competition"]
         agent = context["agent"]
         portfolio = context["portfolio"]
         universe = context["universe"]
 
         as_of_date = date.fromisoformat(context["as_of_date"])
 
-        initial_cash = float(competition["initial_cash"])
         available_cash = float(portfolio["cash_balance"])
 
         config = agent.get("config") or {}
@@ -118,17 +120,37 @@ class MeanReversionStrategy(TradingStrategy):
         }
 
         decisions = []
+        market_value_to_sell = 0.0
+        existing_market_value = 0.0
 
         # --------------------------------------------------
-        # 1. Evaluate existing positions for exit conditions.
+        # 1. Value existing holdings and evaluate exit signals.
         # --------------------------------------------------
 
         for symbol, holding in holdings.items():
 
             stock = stock_by_symbol.get(symbol)
 
-            if stock is None or stock.get("data_status") != "current":
-                continue
+            if (
+                stock is None
+                or stock.get("data_status") != "current"
+                or stock.get("latest_price") is None
+                or float(stock["latest_price"]) <= 0
+            ):
+                return AgentDecision(
+                    as_of_date=as_of_date,
+                    summary=(
+                        f"Unable to value existing holding {symbol} "
+                        "using current market data. No decisions generated."
+                    ),
+                    decisions=[],
+                )
+
+            latest_price = float(stock["latest_price"])
+            quantity = int(holding["quantity"])
+
+            holding_market_value = latest_price * quantity
+            existing_market_value += holding_market_value
 
             indicators = stock.get("indicators") or {}
             rsi = indicators.get("rsi_14")
@@ -142,11 +164,6 @@ class MeanReversionStrategy(TradingStrategy):
                 continue
 
             if rsi < exit_rsi:
-                continue
-
-            quantity = int(holding["quantity"])
-
-            if quantity <= 0:
                 continue
 
             decisions.append(
@@ -164,11 +181,43 @@ class MeanReversionStrategy(TradingStrategy):
                 )
             )
 
+            market_value_to_sell += holding_market_value
+
         # --------------------------------------------------
-        # 2. Evaluate new BUY opportunities.
+        # 2. Calculate projected portfolio exposure.
         # --------------------------------------------------
 
-        if initial_cash <= 0 or available_cash <= 0:
+        portfolio_equity = available_cash + existing_market_value
+
+        if portfolio_equity <= 0:
+            return AgentDecision(
+                as_of_date=as_of_date,
+                summary="Portfolio equity is insufficient for trading.",
+                decisions=decisions,
+            )
+
+        projected_existing_market_value = (
+            existing_market_value - market_value_to_sell
+        )
+
+        maximum_total_exposure = (
+            portfolio_equity * self.MAX_TOTAL_INVESTED_EXPOSURE
+        )
+
+        remaining_exposure = max(
+            0.0,
+            maximum_total_exposure - projected_existing_market_value,
+        )
+
+        maximum_single_stock_value = (
+            portfolio_equity * self.MAX_SINGLE_STOCK_ALLOCATION
+        )
+
+        # --------------------------------------------------
+        # 3. Evaluate new BUY opportunities.
+        # --------------------------------------------------
+
+        if available_cash <= 0:
             return AgentDecision(
                 as_of_date=as_of_date,
                 summary=(
@@ -211,15 +260,12 @@ class MeanReversionStrategy(TradingStrategy):
             sma_20 = float(sma_20)
             latest_price = float(latest_price)
 
-            # Require oversold conditions.
             if not 0 <= rsi < max_rsi:
                 continue
 
-            # Require negative recent momentum.
             if momentum >= 0:
                 continue
 
-            # Require price below its short-term moving average.
             if latest_price >= sma_20:
                 continue
 
@@ -232,7 +278,6 @@ class MeanReversionStrategy(TradingStrategy):
                 }
             )
 
-        # Lowest RSI first: most oversold candidates are considered first.
         candidates.sort(
             key=lambda item: (item["rsi"], item["symbol"]),
         )
@@ -249,23 +294,35 @@ class MeanReversionStrategy(TradingStrategy):
                 decisions=decisions,
             )
 
-        total_budget = min(
-            initial_cash * allocation_fraction,
+        # Do not count future sell proceeds as available cash.
+        # Planned sells can release exposure capacity, but their cash
+        # is unavailable until execution.
+        maximum_new_investment = min(
+            portfolio_equity * allocation_fraction,
             available_cash / self.ORDER_RESERVATION_BUFFER,
+            remaining_exposure / self.ORDER_RESERVATION_BUFFER,
         )
 
-        target_per_stock = total_budget / len(selected_candidates)
+        target_per_stock = (
+            maximum_new_investment / len(selected_candidates)
+        )
 
         for candidate in selected_candidates:
 
             price = candidate["latest_price"]
+
+            target_value = min(
+                target_per_stock,
+                maximum_single_stock_value
+                / self.ORDER_RESERVATION_BUFFER,
+            )
 
             reserved_cost_per_share = (
                 price * self.ORDER_RESERVATION_BUFFER
             )
 
             quantity = floor(
-                target_per_stock / reserved_cost_per_share
+                target_value / reserved_cost_per_share
             )
 
             if quantity <= 0:

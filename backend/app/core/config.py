@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     ALPACA_SECRET_KEY: str
     ALPACA_DATA_URL: str = "https://data.alpaca.markets"
     ALPACA_FEED: str = "iex"
+    ALPACA_PROVIDER: str = "alpaca"
+    ALPACA_ADJUSTMENT: str = "raw"
+    ALPACA_TIMEFRAME: str = "1Day"
 
     # Financial Modeling Prep
     FMP_API_KEY: str | None = None
@@ -25,6 +28,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+    
 
 
 settings = Settings()

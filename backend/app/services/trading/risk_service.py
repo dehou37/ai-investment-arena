@@ -5,8 +5,9 @@ from typing import Any
 from app.schemas.agent_decision import AgentDecision
 
 
-MAX_SINGLE_STOCK_ALLOCATION = Decimal("0.20")
+MAX_SINGLE_STOCK_ALLOCATION = Decimal("0.33")
 MAX_TOTAL_INVESTED_EXPOSURE = Decimal("0.95")
+MARKET_ORDER_EXPOSURE_BUFFER = Decimal("1.05")
 
 
 class RiskValidationError(Exception):
@@ -70,6 +71,11 @@ def validate_agent_decision(
 
     if not isinstance(holdings, list):
         raise RiskValidationError("Portfolio holdings are invalid.")
+
+    open_orders = portfolio.get("open_orders", [])
+
+    if not isinstance(open_orders, list):
+        raise RiskValidationError("Portfolio open orders are invalid.")
 
     # -----------------------------------------------------
     # 2. Validate decision date
@@ -195,6 +201,11 @@ def validate_agent_decision(
                 f"{symbol} market data is stale or missing."
             )
 
+        if symbol in projected_quantities:
+            raise RiskValidationError(
+                f"Duplicate portfolio holding for {symbol}."
+            )
+
         projected_quantities[symbol] = quantity
         current_market_values[symbol] = price * quantity
 
@@ -249,8 +260,8 @@ def validate_agent_decision(
                 f"{symbol} trade quantity must be a positive whole number."
             )
 
-    # Process SELLs first so that proceeds and released exposure
-    # are reflected before evaluating the proposed BUYs.
+    # Process SELLs first so that released exposure is reflected
+    # before evaluating the proposed BUYs.
     for symbol, trade in decisions_by_symbol.items():
 
         if trade.action != "sell":
@@ -281,19 +292,127 @@ def validate_agent_decision(
         )
 
     # -----------------------------------------------------
+    # 6A. Account for outstanding BUY orders
+    # -----------------------------------------------------
+
+    outstanding_buy_values: dict[str, Decimal] = {}
+
+    for order in open_orders:
+        if not isinstance(order, dict):
+            raise RiskValidationError("Invalid open portfolio order.")
+
+        symbol = order.get("symbol")
+
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise RiskValidationError(
+                "Invalid symbol in open portfolio order."
+            )
+
+        symbol = symbol.strip().upper()
+
+        side = order.get("side")
+        order_type = order.get("order_type")
+        remaining_quantity = order.get("remaining_quantity")
+
+        if side not in ("buy", "sell"):
+            raise RiskValidationError(
+                f"Invalid order side for {symbol}."
+            )
+
+        if order_type not in ("market", "limit"):
+            raise RiskValidationError(
+                f"Invalid order type for {symbol}."
+            )
+
+        if (
+            isinstance(remaining_quantity, bool)
+            or not isinstance(remaining_quantity, int)
+            or remaining_quantity <= 0
+        ):
+            raise RiskValidationError(
+                f"Invalid remaining order quantity for {symbol}."
+            )
+
+        # Outstanding SELL orders do not release exposure.
+        if side == "sell":
+            continue
+
+        if symbol not in stock_prices:
+            raise RiskValidationError(
+                f"Outstanding BUY order for {symbol} is outside "
+                "the competition's frozen stock universe."
+            )
+
+        if stock_prices[symbol] <= 0:
+            raise RiskValidationError(
+                f"Cannot value outstanding BUY order for {symbol}: "
+                "market data is stale or missing."
+            )
+
+        if order_type == "limit":
+            limit_price = _to_decimal(
+                order.get("limit_price"),
+                f"{symbol} outstanding BUY limit price",
+            )
+
+            if limit_price <= 0:
+                raise RiskValidationError(
+                    f"Invalid limit price for outstanding BUY order "
+                    f"on {symbol}."
+                )
+
+            estimated_price = limit_price
+
+        else:
+            if order.get("limit_price") is not None:
+                raise RiskValidationError(
+                    f"Market BUY order for {symbol} "
+                    "must not have a limit price."
+                )
+
+            estimated_price = (
+                stock_prices[symbol]
+                * MARKET_ORDER_EXPOSURE_BUFFER
+            )
+
+        order_exposure = estimated_price * remaining_quantity
+
+        outstanding_buy_values[symbol] = (
+            outstanding_buy_values.get(symbol, Decimal("0"))
+            + order_exposure
+        )
+
+    # -----------------------------------------------------
     # 7. Calculate projected exposure
     # -----------------------------------------------------
 
     projected_values: dict[str, Decimal] = {}
 
-    for symbol, quantity in projected_quantities.items():
+    all_symbols = (
+        set(projected_quantities)
+        | set(outstanding_buy_values)
+    )
 
-        if quantity == 0:
-            continue
+    for symbol in all_symbols:
+        quantity = projected_quantities.get(symbol, 0)
 
-        projected_values[symbol] = (
+        holdings_value = (
             stock_prices[symbol] * quantity
+            if quantity > 0
+            else Decimal("0")
         )
+
+        outstanding_buy_value = outstanding_buy_values.get(
+            symbol,
+            Decimal("0"),
+        )
+
+        total_stock_exposure = (
+            holdings_value + outstanding_buy_value
+        )
+
+        if total_stock_exposure > 0:
+            projected_values[symbol] = total_stock_exposure
 
     projected_total_exposure = sum(
         projected_values.values(),

@@ -3,7 +3,13 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 class OrderCreate(BaseModel):
@@ -51,6 +57,27 @@ class OrderCreate(BaseModel):
             raise ValueError("Market orders must not include a limit_price.")
 
         return value
+
+
+class OrderBatchCreate(BaseModel):
+    orders: list[OrderCreate] = Field(
+        min_length=1,
+        max_length=30,
+    )
+
+    @model_validator(mode="after")
+    def validate_unique_symbols(self):
+        symbols = [
+            order.stock_symbol
+            for order in self.orders
+        ]
+
+        if len(symbols) != len(set(symbols)):
+            raise ValueError(
+                "A batch cannot contain multiple orders for the same stock."
+            )
+
+        return self
 
 
 class OrderResponse(BaseModel):

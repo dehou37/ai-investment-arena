@@ -24,8 +24,10 @@ class RiskManagedStrategy(TradingStrategy):
     - Annualized 20-day volatility exceeds the configured maximum.
 
     Capital controls:
-    - Uses a conservative fraction of initial capital.
-    - Limits each new position to a fraction of initial capital.
+    - Uses a conservative fraction of current portfolio equity.
+    - Limits each new position to a fraction of current equity.
+    - Maximum allocation per stock: 33% of portfolio equity.
+    - Maximum total invested exposure: 95% of portfolio equity.
     - Reserves a buying-power buffer.
     - Buys whole shares only.
 
@@ -40,6 +42,9 @@ class RiskManagedStrategy(TradingStrategy):
     DEFAULT_MAX_NEW_POSITIONS = 5
     DEFAULT_MIN_MOMENTUM = 0.0
 
+    MAX_SINGLE_STOCK_ALLOCATION = 0.33
+    MAX_TOTAL_INVESTED_EXPOSURE = 0.95
+
     ORDER_RESERVATION_BUFFER = 1.05
 
     def generate_decision(
@@ -47,14 +52,12 @@ class RiskManagedStrategy(TradingStrategy):
         context: dict[str, Any],
     ) -> AgentDecision:
 
-        competition = context["competition"]
         agent = context["agent"]
         portfolio = context["portfolio"]
         universe = context["universe"]
 
         as_of_date = date.fromisoformat(context["as_of_date"])
 
-        initial_cash = float(competition["initial_cash"])
         available_cash = float(portfolio["cash_balance"])
 
         config = agent.get("config") or {}
@@ -69,7 +72,7 @@ class RiskManagedStrategy(TradingStrategy):
         max_position_fraction = float(
             config.get(
                 "max_position_fraction",
-            self.DEFAULT_MAX_POSITION_FRACTION,
+                self.DEFAULT_MAX_POSITION_FRACTION,
             )
         )
 
@@ -92,13 +95,19 @@ class RiskManagedStrategy(TradingStrategy):
             self.DEFAULT_MAX_NEW_POSITIONS,
         )
 
-        if not 0 < allocation_fraction <= 1:
+        if (
+            not isfinite(allocation_fraction)
+            or not 0 < allocation_fraction <= 1
+        ):
             raise ValueError(
                 "allocation_fraction must be greater than 0 "
                 "and no greater than 1."
             )
 
-        if not 0 < max_position_fraction <= 1:
+        if (
+            not isfinite(max_position_fraction)
+            or not 0 < max_position_fraction <= 1
+        ):
             raise ValueError(
                 "max_position_fraction must be greater than 0 "
                 "and no greater than 1."
@@ -133,19 +142,38 @@ class RiskManagedStrategy(TradingStrategy):
         }
 
         decisions = []
+        existing_market_value = 0.0
+        market_value_to_sell = 0.0
 
         # --------------------------------------------------
-        # 1. Evaluate existing positions for exit conditions.
+        # 1. Value existing holdings and evaluate exit signals.
         # --------------------------------------------------
 
         for symbol, holding in holdings.items():
 
             stock = stock_by_symbol.get(symbol)
 
-            if stock is None or stock.get("data_status") != "current":
-                continue
+            if (
+                stock is None
+                or stock.get("data_status") != "current"
+                or stock.get("latest_price") is None
+                or float(stock["latest_price"]) <= 0
+            ):
+                return AgentDecision(
+                    as_of_date=as_of_date,
+                    summary=(
+                        f"Unable to value existing holding {symbol} "
+                        "using current market data. No decisions generated."
+                    ),
+                    decisions=[],
+                )
 
-            latest_price = stock.get("latest_price")
+            latest_price = float(stock["latest_price"])
+            quantity = int(holding["quantity"])
+
+            holding_market_value = latest_price * quantity
+            existing_market_value += holding_market_value
+
             indicators = stock.get("indicators") or {}
 
             sma_20 = indicators.get("sma_20")
@@ -154,48 +182,30 @@ class RiskManagedStrategy(TradingStrategy):
 
             if any(
                 value is None
-                for value in (
-                    latest_price,
-                    sma_20,
-                    sma_50,
-                    volatility,
-                )
+                for value in (sma_20, sma_50, volatility)
             ):
                 continue
 
-            latest_price = float(latest_price)
             sma_20 = float(sma_20)
             sma_50 = float(sma_50)
             volatility = float(volatility)
 
             if not all(
                 isfinite(value)
-                for value in (
-                    latest_price,
-                    sma_20,
-                    sma_50,
-                    volatility,
-                )
+                for value in (latest_price, sma_20, sma_50, volatility)
             ):
                 continue
 
-            if latest_price <= 0 or sma_20 <= 0 or sma_50 <= 0:
-                continue
-
-            if volatility < 0:
+            if sma_20 <= 0 or sma_50 <= 0 or volatility < 0:
                 continue
 
             exit_reasons = []
 
             if latest_price < sma_20:
-                exit_reasons.append(
-                    "price fell below SMA20"
-                )
+                exit_reasons.append("price fell below SMA20")
 
             if sma_20 < sma_50:
-                exit_reasons.append(
-                    "SMA20 fell below SMA50"
-                )
+                exit_reasons.append("SMA20 fell below SMA50")
 
             if volatility > max_volatility:
                 exit_reasons.append(
@@ -205,11 +215,6 @@ class RiskManagedStrategy(TradingStrategy):
                 )
 
             if not exit_reasons:
-                continue
-
-            quantity = int(holding["quantity"])
-
-            if quantity <= 0:
                 continue
 
             decisions.append(
@@ -226,11 +231,43 @@ class RiskManagedStrategy(TradingStrategy):
                 )
             )
 
+            market_value_to_sell += holding_market_value
+
         # --------------------------------------------------
-        # 2. Evaluate new BUY opportunities.
+        # 2. Calculate portfolio exposure after planned sells.
         # --------------------------------------------------
 
-        if initial_cash <= 0 or available_cash <= 0:
+        portfolio_equity = available_cash + existing_market_value
+
+        if portfolio_equity <= 0:
+            return AgentDecision(
+                as_of_date=as_of_date,
+                summary="Portfolio equity is insufficient for trading.",
+                decisions=decisions,
+            )
+
+        projected_existing_market_value = (
+            existing_market_value - market_value_to_sell
+        )
+
+        maximum_total_exposure = (
+            portfolio_equity * self.MAX_TOTAL_INVESTED_EXPOSURE
+        )
+
+        remaining_exposure = max(
+            0.0,
+            maximum_total_exposure - projected_existing_market_value,
+        )
+
+        maximum_single_stock_value = (
+            portfolio_equity * self.MAX_SINGLE_STOCK_ALLOCATION
+        )
+
+        # --------------------------------------------------
+        # 3. Evaluate new BUY opportunities.
+        # --------------------------------------------------
+
+        if available_cash <= 0:
             return AgentDecision(
                 as_of_date=as_of_date,
                 summary=(
@@ -336,17 +373,23 @@ class RiskManagedStrategy(TradingStrategy):
                 decisions=decisions,
             )
 
-        total_budget = min(
-            initial_cash * allocation_fraction,
+        # Do not count future sell proceeds as available cash.
+        # Planned sells can release exposure capacity, but cash is
+        # unavailable until those orders actually execute.
+        maximum_new_investment = min(
+            portfolio_equity * allocation_fraction,
             available_cash / self.ORDER_RESERVATION_BUFFER,
+            remaining_exposure / self.ORDER_RESERVATION_BUFFER,
         )
 
         target_per_stock = (
-            total_budget / len(selected_candidates)
+            maximum_new_investment / len(selected_candidates)
         )
 
-        max_position_budget = (
-            initial_cash * max_position_fraction
+        # Preserve Guardian's more conservative per-position target.
+        max_position_budget = min(
+            portfolio_equity * max_position_fraction,
+            maximum_single_stock_value,
         )
 
         for candidate in selected_candidates:

@@ -19,9 +19,10 @@ from app.models.stock import Stock
 from app.models.stock_bar import StockBar
 from app.models.stock_universe_membership import StockUniverseMembership
 from app.models.stock_universe_snapshot import StockUniverseSnapshot
-
+from app.models import Order
 from math import sqrt
 from statistics import stdev
+
 
 
 HISTORY_LIMIT = 60
@@ -357,10 +358,53 @@ def _get_agent_portfolio_context(
             }
         )
 
+    open_orders = db.scalars(
+        select(Order)
+        .where(
+            Order.portfolio_id == portfolio.id,
+            Order.status.in_(
+                ["pending", "queued", "partially_filled"]
+            ),
+        )
+        .order_by(Order.submitted_at, Order.id)
+    ).all()
+
+    open_order_context = []
+
+    for order in open_orders:
+        executed_quantity = sum(
+            execution.quantity
+            for execution in order.executions
+        )
+
+        remaining_quantity = (
+            order.quantity - executed_quantity
+        )
+
+        if remaining_quantity <= 0:
+            continue
+
+        open_order_context.append(
+            {
+                "symbol": order.stock.symbol,
+                "side": order.side,
+                "order_type": order.order_type,
+                "quantity": order.quantity,
+                "remaining_quantity": remaining_quantity,
+                "limit_price": (
+                    float(order.limit_price)
+                    if order.limit_price is not None
+                    else None
+                ),
+                "status": order.status,
+            }
+        )
+
     return {
         "portfolio_id": str(portfolio.id),
         "cash_balance": float(portfolio.cash_balance),
         "holdings": holdings,
+        "open_orders": open_order_context,
     }
 
 
