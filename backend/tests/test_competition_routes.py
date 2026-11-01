@@ -15,7 +15,7 @@ from app.main import app
 from app.models import Competition, Stock
 from app.models.stock_universe_snapshot import StockUniverseSnapshot
 from app.models.stock_universe_membership import StockUniverseMembership
-
+from app.models import Agent, Competition, Portfolio, Stock
 
 @pytest.fixture
 def db():
@@ -205,3 +205,117 @@ def test_start_competition_rejects_inactive_snapshot_stocks(
 
     assert response.status_code == 409
     assert "exactly 30 active stocks" in response.json()["detail"]
+
+
+
+def test_add_llm_analyst_to_competition(
+    client,
+    db,
+    pending_competition,
+):
+    response = client.post(
+        f"/api/competitions/{pending_competition.id}/agents",
+        json={
+            "name": "AI Analyst",
+            "strategy_type": "llm_analyst",
+            "description": "Uses a local LLM to analyse market conditions.",
+        },
+    )
+
+    assert response.status_code == 201
+
+    data = response.json()
+
+    assert data["name"] == "AI Analyst"
+    assert data["strategy_type"] == "llm_analyst"
+    assert data["status"] == "active"
+    assert Decimal(data["portfolio"]["cash_balance"]) == Decimal("10000")
+
+    db.expire_all()
+
+    agent = db.scalar(
+        select(Agent).where(
+            Agent.competition_id == pending_competition.id,
+            Agent.name == "AI Analyst",
+        )
+    )
+
+    assert agent is not None
+    assert agent.portfolio is not None
+    assert agent.portfolio.cash_balance == Decimal("10000")
+
+
+def test_add_agent_rejects_unsupported_strategy(
+    client,
+    pending_competition,
+    db,
+):
+    response = client.post(
+        f"/api/competitions/{pending_competition.id}/agents",
+        json={
+            "name": "Value Hunter",
+            "strategy_type": "value",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Unsupported strategy" in response.json()["detail"]
+
+    assert db.scalars(
+        select(Agent).where(
+            Agent.competition_id == pending_competition.id
+        )
+    ).all() == []
+
+
+def test_add_agent_rejects_duplicate_name(
+    client,
+    pending_competition,
+    db,
+):
+    agent = Agent(
+        competition_id=pending_competition.id,
+        name="AI Analyst",
+        strategy_type="llm_analyst",
+        config={},
+        status="active",
+    )
+    db.add(agent)
+    db.flush()
+
+    db.add(
+        Portfolio(
+            agent_id=agent.id,
+            cash_balance=Decimal("10000"),
+        )
+    )
+    db.commit()
+
+    response = client.post(
+        f"/api/competitions/{pending_competition.id}/agents",
+        json={
+            "name": "AI Analyst",
+            "strategy_type": "llm_analyst",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "already exists" in response.json()["detail"]
+
+
+def test_add_agent_rejects_completed_competition(
+    client,
+    pending_competition,
+):
+    pending_competition.status = "completed"
+
+    response = client.post(
+        f"/api/competitions/{pending_competition.id}/agents",
+        json={
+            "name": "AI Analyst",
+            "strategy_type": "llm_analyst",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "completed competition" in response.json()["detail"]

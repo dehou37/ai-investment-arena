@@ -1,8 +1,9 @@
+
 from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CompetitionCreate(BaseModel):
@@ -10,6 +11,12 @@ class CompetitionCreate(BaseModel):
     description: str | None = None
     duration_days: int = 90
     initial_cash: Decimal = Decimal("10000")
+
+
+class AgentCreate(BaseModel):
+    name: str
+    strategy_type: str
+    description: str | None = None
 
 
 class PortfolioSummaryResponse(BaseModel):
@@ -43,4 +50,4 @@ class CompetitionResponse(BaseModel):
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
-    agents: list[AgentResponse] = []
+    agents: list[AgentResponse] = Field(default_factory=list)

@@ -14,13 +14,15 @@ from app.models import (
     Stock,
 )
 from app.schemas.competition import (
+    AgentCreate,
+    AgentResponse,
     CompetitionCreate,
     CompetitionResponse,
 )
 
 from app.models.stock_universe_snapshot import StockUniverseSnapshot
 from app.models.stock_universe_membership import StockUniverseMembership
-
+from app.services.trading.strategies import StrategyRegistry
 router = APIRouter(
     prefix="/api/competitions",
     tags=["Competitions"],
@@ -51,13 +53,6 @@ INITIAL_AGENTS = [
         "strategy_type": "mean_reversion",
         "description": (
             "Looks for stocks that may recover after significant price declines."
-        ),
-    },
-    {
-        "name": "Value Hunter",
-        "strategy_type": "value",
-        "description": (
-            "Looks for companies trading at attractive valuations."
         ),
     },
     {
@@ -96,7 +91,7 @@ def get_competition_query():
 
 # ---------------------------------------------------------
 # POST /api/competitions
-# Create a competition with six agents and portfolios
+# Create a competition with five agents and portfolios
 # ---------------------------------------------------------
 
 @router.post(
@@ -249,14 +244,108 @@ def get_competition(
 
 
 # ---------------------------------------------------------
+# POST /api/competitions/{competition_id}/agents
+# Add an agent and portfolio to an existing competition
+# ---------------------------------------------------------
+
+@router.post(
+    "/{competition_id}/agents",
+    response_model=AgentResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def add_competition_agent(
+    competition_id: UUID,
+    agent_data: AgentCreate,
+    db: Session = Depends(get_db),
+):
+    competition = db.scalar(
+        select(Competition).where(
+            Competition.id == competition_id
+        )
+    )
+
+    if competition is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Competition not found.",
+        )
+
+    if competition.status == "completed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot add agents to a completed competition.",
+        )
+
+    name = agent_data.name.strip()
+    strategy_type = agent_data.strategy_type.strip()
+
+    if not name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Agent name cannot be empty.",
+        )
+
+    if strategy_type not in StrategyRegistry.supported_strategies():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Unsupported strategy '{strategy_type}'. "
+                f"Available strategies: "
+                f"{', '.join(StrategyRegistry.supported_strategies())}."
+            ),
+        )
+
+    existing_agent = db.scalar(
+        select(Agent).where(
+            Agent.competition_id == competition_id,
+            Agent.name == name,
+        )
+    )
+
+    if existing_agent is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Agent '{name}' already exists in this competition.",
+        )
+
+    try:
+        agent = Agent(
+            competition_id=competition.id,
+            name=name,
+            strategy_type=strategy_type,
+            description=agent_data.description,
+            config={},
+            status="active",
+        )
+
+        db.add(agent)
+        db.flush()
+
+        portfolio = Portfolio(
+            agent_id=agent.id,
+            cash_balance=competition.initial_cash,
+        )
+
+        db.add(portfolio)
+        db.commit()
+
+        return db.scalar(
+            select(Agent)
+            .options(selectinload(Agent.portfolio))
+            .where(Agent.id == agent.id)
+        )
+
+    except Exception:
+        db.rollback()
+        raise
+
+
+# ---------------------------------------------------------
 # POST /api/competitions/{competition_id}/start
 # Start a pending competition
 # ---------------------------------------------------------
 
-@router.post(
-    "/{competition_id}/start",
-    response_model=CompetitionResponse,
-)
+
 @router.post(
     "/{competition_id}/start",
     response_model=CompetitionResponse,
