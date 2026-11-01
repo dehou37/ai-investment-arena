@@ -290,38 +290,48 @@ def _build_stock_context(
 def _get_universe_snapshot(
     db: Session,
     competition: Competition,
-) -> StockUniverseSnapshot:
-    """
-    Select the latest completed universe snapshot available
-    when this competition started.
+    ) -> StockUniverseSnapshot:
+        # New competitions use their permanently assigned snapshot.
+        if competition.stock_universe_snapshot_id is not None:
+            snapshot = db.get(
+                StockUniverseSnapshot,
+                competition.stock_universe_snapshot_id,
+            )
 
-    This keeps the stock universe fixed throughout the competition.
-    """
-    if competition.started_at is None:
-        raise ValueError(
-            "Competition must be started before market context "
-            "can be generated."
+            if snapshot is None or snapshot.status != "completed":
+                raise ValueError(
+                    "The competition's assigned stock universe snapshot "
+                    "is missing or is not completed."
+                )
+
+            return snapshot
+
+        # Legacy fallback for competitions started before snapshot linking.
+        if competition.started_at is None:
+            raise ValueError(
+                "Competition must have a start date to resolve its "
+                "stock universe snapshot."
+            )
+
+        statement = (
+            select(StockUniverseSnapshot)
+            .where(
+                StockUniverseSnapshot.status == "completed",
+                StockUniverseSnapshot.as_of <= competition.started_at,
+            )
+            .order_by(StockUniverseSnapshot.as_of.desc())
+            .limit(1)
         )
 
-    statement = (
-        select(StockUniverseSnapshot)
-        .where(
-            StockUniverseSnapshot.status == "completed",
-            StockUniverseSnapshot.as_of <= competition.started_at,
-        )
-        .order_by(StockUniverseSnapshot.as_of.desc())
-        .limit(1)
-    )
+        snapshot = db.scalars(statement).first()
 
-    snapshot = db.scalars(statement).first()
+        if snapshot is None:
+            raise ValueError(
+                "No completed stock universe snapshot exists for "
+                "this competition's start date."
+            )
 
-    if snapshot is None:
-        raise ValueError(
-            "No completed stock universe snapshot was found "
-            "at or before the competition start time."
-        )
-
-    return snapshot
+        return snapshot
 
 
 def _get_agent_portfolio_context(

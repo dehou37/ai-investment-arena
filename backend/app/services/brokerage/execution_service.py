@@ -1,7 +1,8 @@
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
@@ -11,14 +12,16 @@ from app.models import (
     Agent,
     Competition,
     Execution,
+    MarketSessionMonitor,
     Order,
     Portfolio,
     Position,
     StockBar,
 )
 
+
+
 from app.services.brokerage.execution_config import (
-    DAILY_TIMEFRAME,
     MARKET_SLIPPAGE_RATE,
     TRADING_FEE_RATE,
 )
@@ -27,7 +30,97 @@ from app.services.trading.calendar_service import (
     get_market_session_close,
     get_next_market_open,
 )
+
 from app.core.config import settings
+
+from app.services.trading.calendar_service import (
+    get_market_session_open,
+    get_market_session_close,
+    get_next_market_open,
+)
+from app.services.trading.market_session_monitor_service import (
+    MAX_HEARTBEAT_GAP,
+    EXECUTION_GRACE_PERIOD,
+)
+
+NEW_YORK = ZoneInfo("America/New_York")
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Treat naive timestamps as UTC and normalize aware timestamps."""
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+
+    return value.astimezone(timezone.utc)
+
+
+def validate_session_execution_eligibility(
+    db: Session,
+    session_date,
+    now: datetime,
+) -> tuple[bool, str | None]:
+    """
+    Verify that the application monitored the NYSE session
+    continuously enough to permit execution.
+    """
+
+    monitor = db.scalar(
+        select(MarketSessionMonitor)
+        .where(
+            MarketSessionMonitor.session_date == session_date
+        )
+        .with_for_update()
+    )
+
+    # No pre-market registration means no historical execution.
+    if monitor is None:
+        return False, "No pre-market monitoring record exists."
+
+    if monitor.status != "monitoring":
+        return False, (
+            f"Session monitoring status is '{monitor.status}'."
+        )
+
+    session_open = get_market_session_open(session_date)
+    session_close = get_market_session_close(session_date)
+
+    if session_open is None or session_close is None:
+        return False, "NYSE session boundaries are unavailable."
+
+    session_open = _as_utc(session_open)
+    session_close = _as_utc(session_close)
+
+    observed_at = _as_utc(monitor.observed_at)
+    last_heartbeat = _as_utc(monitor.last_heartbeat_at)
+
+    if observed_at > session_open:
+        return False, "Monitoring did not begin before market open."
+
+    heartbeat_gap = now - last_heartbeat
+
+    if heartbeat_gap < timedelta(0):
+        return False, "System clock moved backwards."
+
+    if heartbeat_gap > MAX_HEARTBEAT_GAP:
+        return False, "Heartbeat interruption exceeded the permitted gap."
+
+    if now > session_close + EXECUTION_GRACE_PERIOD:
+        return False, "Execution deadline has passed."
+
+    return True, None
+
+
+def get_order_session_date(order: Order):
+    """
+    Get the NYSE trading date associated with an order's
+    scheduled execution timestamp.
+    """
+
+    scheduled_at = _as_utc(order.scheduled_execution_at)
+
+    return scheduled_at.astimezone(NEW_YORK).date()
+
 
 def get_session_bar(
     db: Session,
@@ -35,11 +128,10 @@ def get_session_bar(
 ):
     """
     Find the daily bar corresponding to the order's
-    scheduled execution session, using the configured
-    Alpaca data source.
+    scheduled NYSE execution session.
     """
 
-    session_date = order.scheduled_execution_at.date()
+    session_date = get_order_session_date(order)
 
     return db.scalar(
         select(StockBar)
@@ -54,6 +146,7 @@ def get_session_bar(
         .order_by(StockBar.timestamp.desc())
         .limit(1)
     )
+
 
 def calculate_fill_price(
     order: Order,
@@ -86,14 +179,9 @@ def calculate_fill_price(
     market_high = Decimal(str(bar.high))
     market_low = Decimal(str(bar.low))
 
-    # -----------------------------------------------------
-    # Market orders
-    # -----------------------------------------------------
-
     if order.order_type == "market":
 
         if order.side == "buy":
-
             execution_price = (
                 market_open
                 * (Decimal("1") + MARKET_SLIPPAGE_RATE)
@@ -104,7 +192,6 @@ def calculate_fill_price(
             ) * order.quantity
 
         else:
-
             execution_price = (
                 market_open
                 * (Decimal("1") - MARKET_SLIPPAGE_RATE)
@@ -119,10 +206,6 @@ def calculate_fill_price(
             market_open,
             slippage_cost,
         )
-
-    # -----------------------------------------------------
-    # Limit orders
-    # -----------------------------------------------------
 
     limit_price = Decimal(str(order.limit_price))
 
@@ -162,9 +245,7 @@ def execute_buy_order(
     execution_price: Decimal,
     slippage_cost: Decimal,
 ):
-    """
-    Execute a buy order and update cash and holdings.
-    """
+    """Execute a buy order and update cash and holdings."""
 
     quantity = order.quantity
 
@@ -174,11 +255,8 @@ def execute_buy_order(
 
     cash_balance = Decimal(str(portfolio.cash_balance))
 
-    # Recheck available cash against actual execution cost.
     if total_cost > cash_balance:
-
         order.status = "rejected"
-
         return None
 
     position = db.scalar(
@@ -211,7 +289,6 @@ def execute_buy_order(
         )
 
         new_cost = execution_price * quantity
-
         new_quantity = old_quantity + quantity
 
         position.average_entry_price = (
@@ -239,9 +316,7 @@ def execute_sell_order(
     execution_price: Decimal,
     slippage_cost: Decimal,
 ):
-    """
-    Execute a sell order and update cash and holdings.
-    """
+    """Execute a sell order and update cash and holdings."""
 
     position = db.scalar(
         select(Position)
@@ -253,16 +328,13 @@ def execute_sell_order(
     )
 
     if position is None or position.quantity < order.quantity:
-
         order.status = "rejected"
-
         return None
 
     quantity = order.quantity
 
     gross_proceeds = execution_price * quantity
     fees = gross_proceeds * TRADING_FEE_RATE
-
     net_proceeds = gross_proceeds - fees
 
     cash_balance = Decimal(str(portfolio.cash_balance))
@@ -291,24 +363,26 @@ def execute_queued_orders(
     """
     Execute eligible queued orders belonging to a competition.
 
-    Execution rules:
+    Missed-session protection:
+        Orders scheduled for an earlier NYSE date are rescheduled
+        to the next eligible market open. They are never filled
+        using the missed session's historical daily bar.
 
-    1. Competition must be active.
-    2. Order must be queued.
-    3. Scheduled execution session must have completed.
-    4. A matching completed daily stock bar must exist.
-    5. Market orders execute at the session open with slippage.
-    6. Limit orders execute only when their limit is reached.
-    7. Unfilled limit orders are rescheduled to the next session.
-    8. Portfolio cash and positions are updated.
-    9. Every successful fill creates an Execution record.
+    Current-session orders:
+        Execute only after the NYSE session closes and matching
+        completed daily market data is available.
 
-    Orders without available completed daily data remain queued.
+    Other rules:
+        - Competition must be active.
+        - Orders must be queued and eligible.
+        - Market orders execute at the session open with slippage.
+        - Limit orders execute only when their limit is reached.
+        - Unfilled limit orders are rescheduled.
+        - Successful fills create Execution records.
+        - Missing daily data leaves orders queued.
     """
 
-    # -----------------------------------------------------
-    # 1. Verify competition
-    # -----------------------------------------------------
+    # 1. Verify competition.
 
     competition = db.scalar(
         select(Competition).where(
@@ -317,24 +391,21 @@ def execute_queued_orders(
     )
 
     if competition is None:
-
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Competition not found.",
         )
 
     if competition.status != "active":
-
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only active competitions can execute orders.",
         )
 
     now = datetime.now(timezone.utc)
+    current_ny_date = now.astimezone(NEW_YORK).date()
 
-    # -----------------------------------------------------
-    # 2. Retrieve queued orders for this competition only
-    # -----------------------------------------------------
+    # 2. Retrieve queued orders for this competition.
 
     queued_orders = db.scalars(
         select(Order)
@@ -364,9 +435,7 @@ def execute_queued_orders(
 
         for order in queued_orders:
 
-            # -------------------------------------------------
-            # 3. Lock portfolio
-            # -------------------------------------------------
+            # 3. Lock portfolio.
 
             portfolio = db.scalar(
                 select(Portfolio)
@@ -379,13 +448,32 @@ def execute_queued_orders(
             if portfolio is None:
                 continue
 
-            # -------------------------------------------------
-            # 4. Verify market session has completed
-            # -------------------------------------------------
+            # 4. Determine the scheduled NYSE session date.
 
-            session_date = (
-                order.scheduled_execution_at.date()
-            )
+            session_date = get_order_session_date(order)
+
+            # 5. Protect against missed historical sessions.
+            #
+            # Never fill an order using a daily bar from a
+            # previous NYSE session.
+
+            if session_date < current_ny_date:
+
+                order.scheduled_execution_at = (
+                    get_next_market_open(now)
+                )
+
+                processed_orders.append(order)
+
+                continue
+
+            # Do not execute an order scheduled for a future
+            # NYSE session.
+
+            if session_date > current_ny_date:
+                continue
+
+            # 6. Verify the current market session has closed.
 
             session_close = get_market_session_close(
                 session_date
@@ -394,37 +482,52 @@ def execute_queued_orders(
             if session_close is None:
                 continue
 
+            session_close = _as_utc(session_close)
+
             if now < session_close:
                 continue
 
-            # -------------------------------------------------
-            # 5. Retrieve daily market data
-            # -------------------------------------------------
+            # 7. Verify the session was monitored before
+            # market open and that heartbeat continuity
+            # is still within the permitted limit.
+
+            eligible, reason = validate_session_execution_eligibility(
+                db=db,
+                session_date=session_date,
+                now=now,
+            )
+
+            if not eligible:
+                order.scheduled_execution_at = (
+                    get_next_market_open(now)
+                )
+
+                processed_orders.append(order)
+
+                continue
+
+            # 8. Retrieve the daily market bar.
 
             bar = get_session_bar(
-                db,
-                order,
+                db=db,
+                order=order,
             )
 
             if bar is None:
                 continue
 
-            # -------------------------------------------------
-            # 6. Calculate execution price
-            # -------------------------------------------------
+            # 8. Calculate execution price.
 
             (
                 execution_price,
                 reference_price,
                 slippage_cost,
             ) = calculate_fill_price(
-                order,
-                bar,
+                order=order,
+                bar=bar,
             )
 
-            # -------------------------------------------------
-            # 7. Handle unfilled limit orders
-            # -------------------------------------------------
+            # 9. Reschedule an unfilled limit order.
 
             if execution_price is None:
 
@@ -436,9 +539,7 @@ def execute_queued_orders(
 
                 continue
 
-            # -------------------------------------------------
-            # 8. Execute buy or sell
-            # -------------------------------------------------
+            # 10. Execute buy or sell.
 
             if order.side == "buy":
 
@@ -460,14 +561,10 @@ def execute_queued_orders(
                     slippage_cost=slippage_cost,
                 )
 
-            # -------------------------------------------------
-            # 9. Record successful execution
-            # -------------------------------------------------
+            # 11. Record successful execution or rejection.
 
             if execution is None:
-
                 processed_orders.append(order)
-
                 continue
 
             db.add(execution)
@@ -476,9 +573,7 @@ def execute_queued_orders(
 
             processed_orders.append(order)
 
-        # -----------------------------------------------------
-        # 10. Commit all updates
-        # -----------------------------------------------------
+        # 12. Commit all updates.
 
         db.commit()
 
@@ -488,7 +583,5 @@ def execute_queued_orders(
         return processed_orders
 
     except Exception:
-
         db.rollback()
-
         raise

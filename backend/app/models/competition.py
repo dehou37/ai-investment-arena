@@ -15,7 +15,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
-
+from sqlalchemy import UUID as SQLAlchemyUUID
 class Competition(Base):
 
 
@@ -61,6 +61,15 @@ class Competition(Base):
     benchmark_stock_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("stocks.id", ondelete="RESTRICT"),
         nullable=False,
+    )
+    stock_universe_snapshot: Mapped["StockUniverseSnapshot | None"] = relationship()
+    stock_universe_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "stock_universe_snapshots.id",
+            name="fk_competitions_universe_snapshot_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
     )
 
     created_at: Mapped[datetime] = mapped_column(

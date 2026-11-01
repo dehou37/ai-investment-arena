@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
@@ -18,6 +18,8 @@ from app.schemas.competition import (
     CompetitionResponse,
 )
 
+from app.models.stock_universe_snapshot import StockUniverseSnapshot
+from app.models.stock_universe_membership import StockUniverseMembership
 
 router = APIRouter(
     prefix="/api/competitions",
@@ -255,6 +257,10 @@ def get_competition(
     "/{competition_id}/start",
     response_model=CompetitionResponse,
 )
+@router.post(
+    "/{competition_id}/start",
+    response_model=CompetitionResponse,
+)
 def start_competition(
     competition_id: UUID,
     db: Session = Depends(get_db),
@@ -281,10 +287,78 @@ def start_competition(
             ),
         )
 
-    competition.status = "active"
-    competition.started_at = datetime.now(timezone.utc)
+    # Capture the start time before selecting the snapshot.
+    start_time = datetime.now(timezone.utc)
 
-    db.commit()
+    # Find the latest completed snapshot available at start time.
+    snapshot = db.scalar(
+        select(StockUniverseSnapshot)
+        .where(
+            StockUniverseSnapshot.status == "completed",
+            StockUniverseSnapshot.as_of <= start_time,
+        )
+        .order_by(StockUniverseSnapshot.as_of.desc())
+        .limit(1)
+    )
+
+    if snapshot is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "No completed stock universe snapshot is available. "
+                "Complete a stock universe import before starting."
+            ),
+        )
+
+    # Verify the declared and actual membership counts.
+    total_members = db.scalar(
+        select(func.count())
+        .select_from(StockUniverseMembership)
+        .where(
+            StockUniverseMembership.snapshot_id == snapshot.id
+        )
+    )
+
+    valid_stock_members = db.scalar(
+        select(func.count())
+        .select_from(StockUniverseMembership)
+        .join(
+            Stock,
+            Stock.id == StockUniverseMembership.stock_id,
+        )
+        .where(
+            StockUniverseMembership.snapshot_id == snapshot.id,
+            Stock.is_active.is_(True),
+            Stock.asset_type == "stock",
+        )
+    )
+
+    if (
+        snapshot.total_members != 30
+        or total_members != 30
+        or valid_stock_members != 30
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "The latest completed stock universe snapshot "
+                "is invalid. It must contain exactly 30 active "
+                "stocks. Please create a valid snapshot first."
+            ),
+        )
+
+    try:
+        # Freeze this snapshot for the competition.
+        competition.stock_universe_snapshot_id = snapshot.id
+
+        competition.status = "active"
+        competition.started_at = start_time
+
+        db.commit()
+
+    except Exception:
+        db.rollback()
+        raise
 
     return db.scalar(
         get_competition_query().where(

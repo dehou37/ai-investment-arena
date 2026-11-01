@@ -10,20 +10,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.database import SessionLocal
 from app.models import Agent, AgentDailyRun, Competition
 from app.services.brokerage.scheduling_service import schedule_orders
-from app.services.trading.calendar_service import (
-    get_market_session_close,
-)
-from app.services.trading.decision_service import (
-    DecisionOrchestrator,
-)
-
+from app.services.trading.calendar_service import get_market_session_close
+from app.services.trading.decision_service import DecisionOrchestrator
 
 class DailyTradingError(Exception):
-    """Raised when daily trading orchestration cannot proceed."""
-
+    """Raised when a daily trading operation cannot be completed."""
 
 class DailyTradingCoordinator:
-
     def __init__(
         self,
         decision_orchestrator: DecisionOrchestrator,
@@ -36,21 +29,19 @@ class DailyTradingCoordinator:
         self,
         competition_id: UUID,
         trading_date: date,
+        submit_orders: bool = True,
     ) -> dict[str, Any]:
         """
-        Process every active agent sequentially for one
-        completed NYSE trading session.
+        Process every active agent for one completed NYSE session.
 
-        Each agent receives an independent database session.
+        submit_orders=True:
+            Generate decisions, submit actionable orders, and schedule them.
 
-        A unique AgentDailyRun record prevents the same agent
-        from being processed twice for the same competition
-        and trading date.
+        submit_orders=False:
+            Generate and record decisions only. No orders are submitted.
+            This is intended for historical sessions missed while the
+            application or computer was offline.
         """
-
-        # -------------------------------------------------
-        # 1. Validate the requested NYSE session
-        # -------------------------------------------------
 
         session_close = get_market_session_close(trading_date)
 
@@ -59,20 +50,15 @@ class DailyTradingCoordinator:
                 f"{trading_date} is not an NYSE trading session."
             )
 
-        now = datetime.now(timezone.utc)
+        if session_close.tzinfo is None:
+            session_close = session_close.replace(tzinfo=timezone.utc)
 
-        if now < session_close:
+        if datetime.now(timezone.utc) < session_close:
             raise DailyTradingError(
-                f"The NYSE session for {trading_date} "
-                "has not closed yet."
+                f"The NYSE session for {trading_date} has not closed yet."
             )
 
-        # -------------------------------------------------
-        # 2. Validate competition and retrieve active agents
-        # -------------------------------------------------
-
         with self.session_factory() as db:
-
             competition = db.scalar(
                 select(Competition).where(
                     Competition.id == competition_id
@@ -80,89 +66,79 @@ class DailyTradingCoordinator:
             )
 
             if competition is None:
-                raise DailyTradingError(
-                    "Competition not found."
-                )
+                raise DailyTradingError("Competition not found.")
 
             if competition.status != "active":
                 raise DailyTradingError(
                     "Only active competitions can run daily trading."
                 )
 
-            agents = db.scalars(
-                select(Agent)
-                .where(
-                    Agent.competition_id == competition_id,
-                    Agent.status == "active",
-                )
-                .order_by(Agent.name.asc())
-            ).all()
+            agents = list(
+                db.scalars(
+                    select(Agent)
+                    .where(
+                        Agent.competition_id == competition_id,
+                        Agent.status == "active",
+                    )
+                    .order_by(Agent.name)
+                ).all()
+            )
 
-            agent_details = [
-                (agent.id, agent.name)
-                for agent in agents
-            ]
-
-        # -------------------------------------------------
-        # 3. Process agents sequentially
-        # -------------------------------------------------
+            agent_ids = [agent.id for agent in agents]
 
         results = []
 
-        for agent_id, agent_name in agent_details:
-
+        for agent_id in agent_ids:
             result = self._process_agent(
                 competition_id=competition_id,
                 agent_id=agent_id,
-                agent_name=agent_name,
                 trading_date=trading_date,
+                submit_orders=submit_orders,
             )
-
             results.append(result)
 
-        # -------------------------------------------------
-        # 4. Build competition-level summary
-        # -------------------------------------------------
+        succeeded = sum(
+            1 for result in results
+            if result["status"] == "succeeded"
+        )
+        failed = sum(
+            1 for result in results
+            if result["status"] == "failed"
+        )
+        skipped = sum(
+            1 for result in results
+            if result["status"] == "skipped"
+        )
 
         return {
             "competition_id": str(competition_id),
             "trading_date": trading_date.isoformat(),
+            "submit_orders": submit_orders,
             "total_agents": len(results),
-            "succeeded": sum(
-                result["status"] == "succeeded"
-                for result in results
-            ),
-            "failed": sum(
-                result["status"] == "failed"
-                for result in results
-            ),
-            "skipped": sum(
-                result["status"] == "skipped"
-                for result in results
-            ),
-            "agents": results,
+            "succeeded": succeeded,
+            "failed": failed,
+            "skipped": skipped,
+            "results": results,
         }
 
     def _process_agent(
         self,
         competition_id: UUID,
         agent_id: UUID,
-        agent_name: str,
         trading_date: date,
+        submit_orders: bool,
     ) -> dict[str, Any]:
         """
-        Claim and process one agent's daily run.
+        Process one agent in its own database session.
 
-        The claim is committed before decision generation.
-        Existing run records are never processed again.
+        A unique AgentDailyRun record prevents the same agent from
+        being processed twice for the same competition session.
+
+        Existing running, succeeded, or failed records are not retried
+        automatically.
         """
 
         with self.session_factory() as db:
-
-            # ---------------------------------------------
-            # 1. Claim this agent's daily run
-            # ---------------------------------------------
-
             daily_run = AgentDailyRun(
                 competition_id=competition_id,
                 agent_id=agent_id,
@@ -188,102 +164,103 @@ class DailyTradingCoordinator:
                     )
                 )
 
-                if existing_run is None:
-                    raise
-
                 return {
                     "agent_id": str(agent_id),
-                    "agent_name": agent_name,
+                    "trading_date": trading_date.isoformat(),
                     "status": "skipped",
-                    "existing_run_status": existing_run.status,
-                    "orders_created": existing_run.orders_created,
+                    "reason": (
+                        "A daily run already exists for this agent "
+                        "and trading session."
+                    ),
+                    "existing_status": (
+                        existing_run.status
+                        if existing_run is not None
+                        else None
+                    ),
+                    "orders_created": (
+                        existing_run.orders_created
+                        if existing_run is not None
+                        else 0
+                    ),
                 }
 
-            run_id = daily_run.id
-
-            # ---------------------------------------------
-            # 2. Generate and submit approved decisions
-            # ---------------------------------------------
-
             try:
-                decision, orders = (
-                    self.decision_orchestrator
-                    .generate_and_submit_agent_orders(
-                        db=db,
-                        competition_id=competition_id,
-                        agent_id=agent_id,
-                        as_of_date=trading_date,
+                if submit_orders:
+                    decision, orders = (
+                        self.decision_orchestrator
+                        .generate_and_submit_agent_orders(
+                            db=db,
+                            competition_id=competition_id,
+                            agent_id=agent_id,
+                            as_of_date=trading_date,
+                        )
                     )
-                )
 
-                # -----------------------------------------
-                # 3. Schedule only this agent's new orders
-                # -----------------------------------------
+                    # Only schedule orders created by this agent's
+                    # current daily run.
+                    schedule_orders(
+                        db=db,
+                        orders=orders,
+                    )
 
-                schedule_orders(
-                    db=db,
-                    orders=orders,
-                )
+                else:
+                    # Historical recovery: generate and record the
+                    # decision, but do not submit or schedule orders.
+                    decision = (
+                        self.decision_orchestrator
+                        .generate_agent_decision(
+                            db=db,
+                            competition_id=competition_id,
+                            agent_id=agent_id,
+                            as_of_date=trading_date,
+                        )
+                    )
 
-                # -----------------------------------------
-                # 4. Record successful outcome
-                # -----------------------------------------
-
-                daily_run = db.get(
-                    AgentDailyRun,
-                    run_id,
-                )
+                    orders = []
 
                 daily_run.decision = decision.model_dump(
                     mode="json"
                 )
-
                 daily_run.orders_created = len(orders)
                 daily_run.status = "succeeded"
-                daily_run.completed_at = datetime.now(
-                    timezone.utc
-                )
+                daily_run.completed_at = datetime.now(timezone.utc)
 
                 db.commit()
 
                 return {
                     "agent_id": str(agent_id),
-                    "agent_name": agent_name,
+                    "trading_date": trading_date.isoformat(),
                     "status": "succeeded",
                     "orders_created": len(orders),
+                    "decision_summary": decision.summary,
+                    "submit_orders": submit_orders,
                 }
 
-            except Exception as error:
-
-                # -----------------------------------------
-                # 5. Record failure without stopping others
-                # -----------------------------------------
-
+            except Exception as exc:
                 db.rollback()
 
-                daily_run = db.get(
-                    AgentDailyRun,
-                    run_id,
+                # Reload the run because the previous transaction
+                # may have been rolled back.
+                daily_run = db.scalar(
+                    select(AgentDailyRun).where(
+                        AgentDailyRun.competition_id == competition_id,
+                        AgentDailyRun.agent_id == agent_id,
+                        AgentDailyRun.trading_date == trading_date,
+                    )
                 )
 
                 if daily_run is not None:
-
                     daily_run.status = "failed"
-
-                    daily_run.error_message = (
-                        f"{type(error).__name__}: {error}"
-                    )[:2000]
-
-                    daily_run.completed_at = datetime.now(
-                        timezone.utc
-                    )
+                    daily_run.error_message = str(exc)[:2000]
+                    daily_run.completed_at = datetime.now(timezone.utc)
 
                     db.commit()
 
                 return {
                     "agent_id": str(agent_id),
-                    "agent_name": agent_name,
+                    "trading_date": trading_date.isoformat(),
                     "status": "failed",
+                    "error": str(exc),
                     "orders_created": 0,
-                    "error_message": str(error)[:2000],
+                    "submit_orders": submit_orders,
                 }

@@ -16,6 +16,7 @@ from app.models import (
     Agent,
     Competition,
     Execution,
+    MarketSessionMonitor,
     Order,
     Portfolio,
     Position,
@@ -109,22 +110,33 @@ def trading_setup(db):
 
 
 @pytest.fixture
-def market_session(monkeypatch):
+def market_session(db, monkeypatch):
     """
-    Make the scheduled session eligible for execution
-    without depending on the real exchange calendar.
+    Simulate a completed NYSE session with valid
+    pre-market monitoring and a recent heartbeat.
     """
 
     now = datetime.now(timezone.utc)
 
-    scheduled_at = now - timedelta(days=1)
+    scheduled_at = now - timedelta(minutes=2)
+    session_open = now - timedelta(hours=2)
     session_close = now - timedelta(minutes=1)
     next_market_open = now + timedelta(days=1)
+
+    session_date = scheduled_at.astimezone(
+        execution_service.NEW_YORK
+    ).date()
+
+    monkeypatch.setattr(
+        execution_service,
+        "get_market_session_open",
+        lambda date: session_open,
+    )
 
     monkeypatch.setattr(
         execution_service,
         "get_market_session_close",
-        lambda session_date: session_close,
+        lambda date: session_close,
     )
 
     monkeypatch.setattr(
@@ -133,8 +145,20 @@ def market_session(monkeypatch):
         lambda timestamp: next_market_open,
     )
 
+    monitor = MarketSessionMonitor(
+        session_date=session_date,
+        status="monitoring",
+        observed_at=session_open - timedelta(minutes=5),
+        last_heartbeat_at=now,
+    )
+
+    db.add(monitor)
+    db.commit()
+
     return {
         "now": now,
+        "session_date": session_date,
+        "session_open": session_open,
         "scheduled_at": scheduled_at,
         "session_close": session_close,
         "next_market_open": next_market_open,
@@ -466,3 +490,184 @@ def test_inactive_competition_cannot_execute_orders(
 
     assert exc.value.status_code == 400
     assert get_executions(db) == []
+
+
+def test_missed_session_order_is_rescheduled_without_execution(
+    db,
+    trading_setup,
+    market_session,
+    monkeypatch,
+):
+    setup = trading_setup
+
+    order = create_queued_order(
+        db,
+        setup,
+        market_session,
+        side="buy",
+        quantity=1,
+    )
+
+    # Move the order to the previous NYSE calendar date.
+    order.scheduled_execution_at = (
+        market_session["scheduled_at"] - timedelta(days=1)
+    )
+    db.commit()
+    db.refresh(order)
+
+    # A historical bar must never be requested for this order.
+    def unexpected_bar_lookup(db, order):
+        raise AssertionError(
+            "Historical market data must not be used for missed orders."
+        )
+
+    monkeypatch.setattr(
+        execution_service,
+        "get_session_bar",
+        unexpected_bar_lookup,
+    )
+
+    result = execution_service.execute_queued_orders(
+        db,
+        setup["competition"].id,
+    )
+
+    assert len(result) == 1
+    assert order.status == "queued"
+
+    assert order.scheduled_execution_at == (
+        market_session["next_market_open"].replace(tzinfo=None)
+    )
+
+    assert get_executions(db) == []
+
+    assert setup["portfolio"].cash_balance == Decimal("10000")
+
+
+def test_order_not_executed_without_monitoring_record(
+    db,
+    trading_setup,
+    market_session,
+):
+    order = create_queued_order(db, trading_setup, market_session)
+
+    monitor = db.scalar(
+        select(MarketSessionMonitor).where(
+            MarketSessionMonitor.session_date
+            == market_session["session_date"]
+        )
+    )
+
+    db.delete(monitor)
+    db.commit()
+
+    result = execution_service.execute_queued_orders(
+        db,
+        trading_setup["competition"].id,
+    )
+
+    assert order.status == "queued"
+    assert len(result) == 1
+    assert get_executions(db) == []
+    assert (
+        order.scheduled_execution_at.replace(tzinfo=timezone.utc)
+        == market_session["next_market_open"]
+    )
+
+
+def test_order_not_executed_if_monitoring_started_late(
+    db,
+    trading_setup,
+    market_session,
+):
+    order = create_queued_order(db, trading_setup, market_session)
+
+    monitor = db.scalar(
+        select(MarketSessionMonitor).where(
+            MarketSessionMonitor.session_date
+            == market_session["session_date"]
+        )
+    )
+
+    monitor.observed_at = (
+        market_session["session_open"] + timedelta(seconds=1)
+    )
+    db.commit()
+
+    result = execution_service.execute_queued_orders(
+        db,
+        trading_setup["competition"].id,
+    )
+
+    assert order.status == "queued"
+    assert len(result) == 1
+    assert get_executions(db) == []
+    assert (
+        order.scheduled_execution_at.replace(tzinfo=timezone.utc)
+        == market_session["next_market_open"]
+    )
+
+
+def test_order_not_executed_after_heartbeat_interruption(
+    db,
+    trading_setup,
+    market_session,
+):
+    order = create_queued_order(db, trading_setup, market_session)
+
+    monitor = db.scalar(
+        select(MarketSessionMonitor).where(
+            MarketSessionMonitor.session_date
+            == market_session["session_date"]
+        )
+    )
+
+    monitor.last_heartbeat_at = (
+        market_session["now"] - timedelta(minutes=4)
+    )
+    db.commit()
+
+    result = execution_service.execute_queued_orders(
+        db,
+        trading_setup["competition"].id,
+    )
+
+    assert order.status == "queued"
+    assert len(result) == 1
+    assert get_executions(db) == []
+    assert (
+        order.scheduled_execution_at.replace(tzinfo=timezone.utc)
+        == market_session["next_market_open"]
+    )
+
+
+def test_order_not_executed_after_execution_deadline(
+    db,
+    trading_setup,
+    market_session,
+    monkeypatch,
+):
+    order = create_queued_order(db, trading_setup, market_session)
+
+    expired_session_close = (
+        datetime.now(timezone.utc) - timedelta(minutes=16)
+    )
+
+    monkeypatch.setattr(
+        execution_service,
+        "get_market_session_close",
+        lambda session_date: expired_session_close,
+    )
+
+    result = execution_service.execute_queued_orders(
+        db,
+        trading_setup["competition"].id,
+    )
+
+    assert order.status == "queued"
+    assert len(result) == 1
+    assert get_executions(db) == []
+    assert (
+        order.scheduled_execution_at.replace(tzinfo=timezone.utc)
+        == market_session["next_market_open"]
+    )

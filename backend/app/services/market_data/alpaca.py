@@ -21,18 +21,12 @@ class AlpacaMarketDataClient:
         start: str,
         end: str,
     ) -> dict:
-        """
-        Retrieve historical daily stock bars from Alpaca.
-
-        Dates should be supplied as YYYY-MM-DD strings.
-        """
-
         params = {
             "symbols": ",".join(symbols),
-            "timeframe": "1Day",
+            "timeframe": settings.ALPACA_TIMEFRAME,
             "start": start,
             "end": end,
-            "adjustment": "raw",
+            "adjustment": settings.ALPACA_ADJUSTMENT,
             "feed": settings.ALPACA_FEED,
             "limit": 10000,
             "sort": "asc",
@@ -45,8 +39,8 @@ class AlpacaMarketDataClient:
                 "/v2/stocks/bars",
                 params=params,
             )
-
             response.raise_for_status()
+
             data = response.json()
 
             for symbol, bars in data.get("bars", {}).items():
