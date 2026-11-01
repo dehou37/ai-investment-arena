@@ -1,9 +1,10 @@
+
 import asyncio
 import logging
 from typing import Any
 
-from app.services.trading.recovery_service import (
-    DailyTradingRecoveryService,
+from app.services.trading.autonomous_trading_service import (
+    AutonomousTradingService,
 )
 
 
@@ -12,19 +13,19 @@ logger = logging.getLogger("uvicorn.error")
 
 class DailyTradingSchedulerService:
     """
-    Periodically checks for completed NYSE sessions and processes
-    active competitions through the recovery service.
+    Periodically runs the complete autonomous trading workflow.
 
-    The recovery service handles:
-    - Historical decision-only recovery.
-    - Deferring sessions that are still being monitored.
-    - Submitting orders after a healthy session is completed.
-    - Preventing duplicate daily agent runs.
+    The autonomous service handles:
+    - Market-data readiness checks and ingestion.
+    - Execution of eligible queued orders.
+    - Historical decision recovery.
+    - Latest-session decision generation.
+    - Competition-level failure isolation.
     """
 
     def __init__(
         self,
-        recovery_service: DailyTradingRecoveryService,
+        autonomous_service: AutonomousTradingService,
         interval_seconds: int = 60,
     ):
         if interval_seconds <= 0:
@@ -32,22 +33,22 @@ class DailyTradingSchedulerService:
                 "Scheduler interval must be greater than zero."
             )
 
-        self.recovery_service = recovery_service
+        self.autonomous_service = autonomous_service
         self.interval_seconds = interval_seconds
 
     def run_once(self) -> dict[str, Any]:
         """
-        Perform one scheduled recovery/trading check.
+        Perform one complete autonomous trading check.
         """
 
         return (
-            self.recovery_service
-            .recover_all_active_competitions()
+            self.autonomous_service
+            .run_all_active_competitions()
         )
 
     async def run_forever(self) -> None:
         """
-        Run scheduled checks continuously.
+        Run autonomous trading checks continuously.
 
         Database and trading operations run in a worker thread
         so they do not block FastAPI's event loop.

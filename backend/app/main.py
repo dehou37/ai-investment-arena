@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 from contextlib import asynccontextmanager
@@ -12,12 +13,17 @@ from app.api.routes import portfolio
 from app.api.routes import snapshots
 
 from app.services.llm.ollama_client import OllamaClient
+from app.services.market_data.alpaca import AlpacaMarketDataClient
+
 from app.services.trading.decision_service import DecisionOrchestrator
 from app.services.trading.daily_trading_service import (
     DailyTradingCoordinator,
 )
 from app.services.trading.recovery_service import (
     DailyTradingRecoveryService,
+)
+from app.services.trading.autonomous_trading_service import (
+    AutonomousTradingService,
 )
 from app.services.trading.market_session_monitor_service import (
     MarketSessionMonitorService,
@@ -37,11 +43,15 @@ async def lifespan(app: FastAPI):
     """
 
     ollama_client = OllamaClient()
+    alpaca_client = None
 
     monitor_task = None
     scheduler_task = None
 
     try:
+        # One shared market-data client for the application lifetime.
+        alpaca_client = AlpacaMarketDataClient()
+
         decision_orchestrator = DecisionOrchestrator(
             ollama_client=ollama_client
         )
@@ -54,18 +64,28 @@ async def lifespan(app: FastAPI):
             coordinator=daily_trading_coordinator,
         )
 
+        autonomous_trading_service = AutonomousTradingService(
+            client=alpaca_client,
+            recovery_service=daily_trading_recovery_service,
+        )
+
         market_session_monitor_service = MarketSessionMonitorService()
 
         daily_trading_scheduler_service = DailyTradingSchedulerService(
-            recovery_service=daily_trading_recovery_service,
+            autonomous_service=autonomous_trading_service,
             interval_seconds=60,
         )
 
+        # Expose shared services through application state.
         app.state.ollama_client = ollama_client
+        app.state.alpaca_client = alpaca_client
         app.state.decision_orchestrator = decision_orchestrator
         app.state.daily_trading_coordinator = daily_trading_coordinator
         app.state.daily_trading_recovery_service = (
             daily_trading_recovery_service
+        )
+        app.state.autonomous_trading_service = (
+            autonomous_trading_service
         )
         app.state.market_session_monitor_service = (
             market_session_monitor_service
@@ -74,7 +94,7 @@ async def lifespan(app: FastAPI):
             daily_trading_scheduler_service
         )
 
-        # Start the market-session heartbeat monitor first.
+        # Start the market-session heartbeat monitor independently.
         monitor_task = asyncio.create_task(
             market_session_monitor_service.run_forever(),
             name="market-session-monitor",
@@ -82,24 +102,23 @@ async def lifespan(app: FastAPI):
 
         logger.info("Market session monitor background task started.")
 
-        # Recover missed sessions during application startup.
+        # Startup recovery uses the complete autonomous workflow.
         try:
             recovery_result = await asyncio.to_thread(
-                daily_trading_recovery_service
-                .recover_all_active_competitions
+                autonomous_trading_service.run_all_active_competitions
             )
 
             logger.info(
-                "Startup daily trading recovery completed: %s",
+                "Startup autonomous trading check completed: %s",
                 recovery_result,
             )
 
         except Exception:
             logger.exception(
-                "Startup daily trading recovery encountered an error."
+                "Startup autonomous trading check encountered an error."
             )
 
-        # Start periodic daily trading checks after startup recovery.
+        # Start periodic autonomous trading checks.
         scheduler_task = asyncio.create_task(
             daily_trading_scheduler_service.run_forever(),
             name="daily-trading-scheduler",
@@ -121,7 +140,7 @@ async def lifespan(app: FastAPI):
                     "Daily trading scheduler background task stopped."
                 )
 
-        # Stop the market-session monitor.
+        # Stop the independent market-session monitor.
         if monitor_task is not None:
             monitor_task.cancel()
 
@@ -131,6 +150,10 @@ async def lifespan(app: FastAPI):
                 logger.info(
                     "Market session monitor background task stopped."
                 )
+
+        # Close shared external clients.
+        if alpaca_client is not None:
+            alpaca_client.close()
 
         ollama_client.close()
 

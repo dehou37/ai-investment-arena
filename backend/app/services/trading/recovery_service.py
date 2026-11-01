@@ -13,7 +13,7 @@ from app.services.trading.daily_trading_service import (
     DailyTradingCoordinator,
 )
 
-
+from datetime import date
 class DailyTradingRecoveryService:
     """
     Recovers completed daily trading sessions for active competitions.
@@ -44,6 +44,7 @@ class DailyTradingRecoveryService:
     def recover_competition(
         self,
         competition_id: UUID,
+        ready_sessions: set[date] | None = None,
     ) -> dict[str, Any]:
         """
         Recover completed sessions for one active competition.
@@ -85,7 +86,19 @@ class DailyTradingRecoveryService:
             }
 
         latest_session = completed_sessions[-1]
+                # When supplied, only sessions with complete market data
+        # may be recovered.
 
+        if ready_sessions is None:
+            ready_session_dates = set(completed_sessions)
+        else:
+            ready_session_dates = ready_sessions
+
+        sessions_to_process = [
+            trading_date
+            for trading_date in completed_sessions
+            if trading_date in ready_session_dates
+        ]
         # Determine whether the latest completed session was
         # monitored continuously through its execution deadline.
         with self.session_factory() as db:
@@ -107,7 +120,7 @@ class DailyTradingRecoveryService:
 
         session_results = []
 
-        for trading_date in completed_sessions:
+        for trading_date in sessions_to_process:
 
             if (
                 trading_date == latest_session
@@ -119,6 +132,7 @@ class DailyTradingRecoveryService:
             # may submit orders.
             submit_orders = (
                 trading_date == latest_session
+                and latest_session in ready_session_dates
                 and monitor_status == "completed"
             )
 
@@ -136,6 +150,9 @@ class DailyTradingRecoveryService:
             "sessions_processed": len(session_results),
             "sessions_deferred": (
                 1 if defer_latest_session else 0
+            ),
+            "sessions_skipped_data": (
+                len(completed_sessions) - len(sessions_to_process)
             ),
             "latest_completed_session": latest_session.isoformat(),
             "latest_session_monitor_status": monitor_status,

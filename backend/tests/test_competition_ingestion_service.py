@@ -282,3 +282,51 @@ def test_ingestion_rejects_invalid_session_date_type(setup_ingestion):
         )
 
     assert client.request is None
+
+def test_data_status_returns_complete_when_all_31_bars_exist(
+    setup_ingestion,
+):
+    competition, stocks, db, _ = setup_ingestion
+
+    result = service.get_competition_session_data_status(
+        db=db,
+        competition_id=competition.id,
+        session_date=SESSION_DATE,
+    )
+
+    assert result["status"] == "complete"
+    assert result["symbols_requested"] == 31
+    assert result["symbols_available"] == 31
+    assert result["missing_symbols"] == []
+
+
+def test_data_status_reports_missing_symbols(setup_ingestion):
+    competition, stocks, db, _ = setup_ingestion
+
+    db.available_stock_ids.remove(stocks["STOCK29"].id)
+    db.available_stock_ids.remove(stocks["SPY"].id)
+
+    result = service.get_competition_session_data_status(
+        db=db,
+        competition_id=competition.id,
+        session_date=SESSION_DATE,
+    )
+
+    assert result["status"] == "incomplete"
+    assert result["symbols_requested"] == 31
+    assert result["symbols_available"] == 29
+    assert result["missing_symbols"] == ["SPY", "STOCK29"]
+
+
+def test_data_status_rejects_missing_competition():
+    db = FakeDatabase(None)
+
+    with pytest.raises(
+        ValueError,
+        match="Competition was not found",
+    ):
+        service.get_competition_session_data_status(
+            db=db,
+            competition_id=uuid4(),
+            session_date=SESSION_DATE,
+        )

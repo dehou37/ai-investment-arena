@@ -1,3 +1,4 @@
+
 import asyncio
 from unittest.mock import Mock
 
@@ -8,8 +9,8 @@ from app.services.trading.scheduler_service import (
 )
 
 
-def test_run_once_calls_recovery_service():
-    recovery_service = Mock()
+def test_run_once_calls_autonomous_service():
+    autonomous_service = Mock()
 
     expected_result = {
         "total_competitions": 1,
@@ -18,29 +19,30 @@ def test_run_once_calls_recovery_service():
         "results": [],
     }
 
-    recovery_service.recover_all_active_competitions.return_value = (
+    autonomous_service.run_all_active_competitions.return_value = (
         expected_result
     )
 
     scheduler = DailyTradingSchedulerService(
-        recovery_service=recovery_service,
+        autonomous_service=autonomous_service,
     )
 
     result = scheduler.run_once()
 
     assert result == expected_result
-    recovery_service.recover_all_active_competitions.assert_called_once()
+
+    autonomous_service.run_all_active_competitions.assert_called_once()
 
 
 def test_scheduler_rejects_non_positive_interval():
-    recovery_service = Mock()
+    autonomous_service = Mock()
 
     with pytest.raises(
         ValueError,
         match="greater than zero",
     ):
         DailyTradingSchedulerService(
-            recovery_service=recovery_service,
+            autonomous_service=autonomous_service,
             interval_seconds=0,
         )
 
@@ -49,15 +51,15 @@ def test_scheduler_rejects_non_positive_interval():
         match="greater than zero",
     ):
         DailyTradingSchedulerService(
-            recovery_service=recovery_service,
+            autonomous_service=autonomous_service,
             interval_seconds=-1,
         )
 
 
 def test_background_scheduler_runs_and_cancels_cleanly():
-    recovery_service = Mock()
+    autonomous_service = Mock()
 
-    recovery_service.recover_all_active_competitions.return_value = {
+    autonomous_service.run_all_active_competitions.return_value = {
         "total_competitions": 0,
         "succeeded": 0,
         "failed": 0,
@@ -65,7 +67,7 @@ def test_background_scheduler_runs_and_cancels_cleanly():
     }
 
     scheduler = DailyTradingSchedulerService(
-        recovery_service=recovery_service,
+        autonomous_service=autonomous_service,
         interval_seconds=0.01,
     )
 
@@ -75,16 +77,13 @@ def test_background_scheduler_runs_and_cancels_cleanly():
         )
 
         try:
-            # Allow several scheduler intervals to pass.
             for _ in range(100):
-                if recovery_service.recover_all_active_competitions.called:
+                if autonomous_service.run_all_active_competitions.called:
                     break
 
                 await asyncio.sleep(0.01)
 
-            assert (
-                recovery_service.recover_all_active_competitions.called
-            )
+            assert autonomous_service.run_all_active_competitions.called
 
         finally:
             task.cancel()

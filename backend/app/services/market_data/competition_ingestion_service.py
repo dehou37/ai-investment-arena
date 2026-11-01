@@ -151,7 +151,77 @@ def _get_competition_stocks(
     stocks_by_symbol[benchmark.symbol] = benchmark
 
     return stocks_by_symbol
+def get_competition_session_data_status(
+    db: Session,
+    competition_id,
+    session_date: date,
+) -> dict:
+    """
+    Check whether all 30 competition stocks and its benchmark
+    have persisted daily bars for the requested NYSE session.
+    """
 
+    if isinstance(session_date, datetime) or not isinstance(
+        session_date, date
+    ):
+        raise ValueError("session_date must be a datetime.date.")
+
+    competition = db.get(Competition, competition_id)
+
+    if competition is None:
+        raise ValueError("Competition was not found.")
+
+    stocks_by_symbol = _get_competition_stocks(
+        db,
+        competition,
+    )
+
+    session_start = datetime.combine(
+        session_date,
+        time.min,
+        tzinfo=NEW_YORK,
+    ).astimezone(UTC)
+
+    session_end = datetime.combine(
+        session_date + timedelta(days=1),
+        time.min,
+        tzinfo=NEW_YORK,
+    ).astimezone(UTC)
+
+    available_stock_ids = set(
+        db.scalars(
+            select(StockBar.stock_id).where(
+                StockBar.stock_id.in_(
+                    [stock.id for stock in stocks_by_symbol.values()]
+                ),
+                StockBar.timestamp >= session_start,
+                StockBar.timestamp < session_end,
+                StockBar.timeframe == settings.ALPACA_TIMEFRAME,
+                StockBar.provider == settings.ALPACA_PROVIDER,
+                StockBar.feed == settings.ALPACA_FEED,
+                StockBar.adjustment == settings.ALPACA_ADJUSTMENT,
+            )
+        ).all()
+    )
+
+    missing_symbols = sorted(
+        symbol
+        for symbol, stock in stocks_by_symbol.items()
+        if stock.id not in available_stock_ids
+    )
+
+    return {
+        "competition_id": str(competition.id),
+        "session_date": session_date.isoformat(),
+        "symbols_requested": len(stocks_by_symbol),
+        "symbols_available": (
+            len(stocks_by_symbol) - len(missing_symbols)
+        ),
+        "missing_symbols": missing_symbols,
+        "status": (
+            "complete" if not missing_symbols else "incomplete"
+        ),
+    }
 
 def ingest_competition_session(
     db: Session,

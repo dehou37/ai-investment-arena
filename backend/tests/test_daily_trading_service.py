@@ -674,3 +674,159 @@ def test_recovery_does_not_submit_orders_without_healthy_monitor(
         call.kwargs["submit_orders"] is False
         for call in calls
     )
+
+
+
+def test_recovery_skips_sessions_without_complete_market_data(
+    session_factory,
+    trading_setup,
+    monkeypatch,
+):
+    from app.services.trading import recovery_service
+    from app.services.trading.recovery_service import (
+        DailyTradingRecoveryService,
+    )
+
+    historical_sessions = [
+        date(2026, 10, 28),
+        date(2026, 10, 29),
+        date(2026, 10, 30),
+    ]
+
+    with session_factory() as db:
+        competition = db.get(
+            Competition,
+            trading_setup["competition_id"],
+        )
+        competition.started_at = datetime(
+            2026, 10, 27, 12, 0,
+            tzinfo=timezone.utc,
+        )
+
+        db.add(
+            MarketSessionMonitor(
+                session_date=date(2026, 10, 30),
+                status="completed",
+                observed_at=datetime(
+                    2026, 10, 30, 13, 0,
+                    tzinfo=timezone.utc,
+                ),
+                last_heartbeat_at=datetime(
+                    2026, 10, 30, 21, 15,
+                    tzinfo=timezone.utc,
+                ),
+                completed_at=datetime(
+                    2026, 10, 30, 21, 16,
+                    tzinfo=timezone.utc,
+                ),
+            )
+        )
+        db.commit()
+
+    monkeypatch.setattr(
+        recovery_service,
+        "get_completed_market_sessions",
+        lambda started_at: historical_sessions,
+    )
+
+    coordinator = Mock()
+    coordinator.run_competition_for_session.return_value = {
+        "succeeded": 1,
+        "failed": 0,
+        "skipped": 0,
+    }
+
+    recovery = DailyTradingRecoveryService(
+        coordinator=coordinator,
+        session_factory=session_factory,
+    )
+
+    result = recovery.recover_competition(
+        competition_id=trading_setup["competition_id"],
+        ready_sessions={
+            date(2026, 10, 28),
+            date(2026, 10, 29),
+        },
+    )
+
+    assert result["sessions_found"] == 3
+    assert result["sessions_processed"] == 2
+    assert result["sessions_skipped_data"] == 1
+
+    calls = coordinator.run_competition_for_session.call_args_list
+
+    assert len(calls) == 2
+
+    assert all(
+        call.kwargs["submit_orders"] is False
+        for call in calls
+    )
+
+    assert [
+        call.kwargs["trading_date"]
+        for call in calls
+    ] == historical_sessions[:2]
+
+
+def test_recovery_processes_only_ready_sessions(
+    session_factory,
+    trading_setup,
+    monkeypatch,
+):
+    from app.services.trading import recovery_service
+    from app.services.trading.recovery_service import (
+        DailyTradingRecoveryService,
+    )
+
+    historical_sessions = [
+        date(2026, 10, 28),
+        date(2026, 10, 29),
+        date(2026, 10, 30),
+    ]
+
+    with session_factory() as db:
+        competition = db.get(
+            Competition,
+            trading_setup["competition_id"],
+        )
+        competition.started_at = datetime(
+            2026, 10, 27, 12, 0,
+            tzinfo=timezone.utc,
+        )
+        db.commit()
+
+    monkeypatch.setattr(
+        recovery_service,
+        "get_completed_market_sessions",
+        lambda started_at: historical_sessions,
+    )
+
+    coordinator = Mock()
+    coordinator.run_competition_for_session.return_value = {
+        "succeeded": 1,
+        "failed": 0,
+        "skipped": 0,
+    }
+
+    recovery = DailyTradingRecoveryService(
+        coordinator=coordinator,
+        session_factory=session_factory,
+    )
+
+    result = recovery.recover_competition(
+        competition_id=trading_setup["competition_id"],
+        ready_sessions={
+            date(2026, 10, 29),
+        },
+    )
+
+    assert result["sessions_found"] == 3
+    assert result["sessions_processed"] == 1
+    assert result["sessions_skipped_data"] == 2
+
+    coordinator.run_competition_for_session.assert_called_once()
+
+    call = coordinator.run_competition_for_session.call_args
+
+    assert call.kwargs["trading_date"] == date(2026, 10, 29)
+    assert call.kwargs["submit_orders"] is False
