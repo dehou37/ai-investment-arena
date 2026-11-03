@@ -55,6 +55,22 @@ IMPORTANT RULES:
 21. Prefer conservative position sizing. If uncertain about
     the permitted quantity, recommend fewer shares or HOLD.
 
+OUTPUT UNIQUENESS RULES — CRITICAL:
+
+22. Each stock symbol may appear at most ONCE in the decisions array.
+23. Never produce separate BUY and SELL decisions for the same symbol.
+24. Never repeat a symbol, even if you have multiple reasons
+    to discuss that stock.
+25. Before returning your response, check every symbol in the
+    decisions array and remove any duplicate entries by
+    reconsidering the stock and choosing one final action.
+26. If there is no justified trade for a stock, you may omit it.
+    Do not create multiple HOLD entries for the same stock.
+27. The decisions array must be one flat array of decision objects.
+    Do not create separate arrays for BUY, SELL or HOLD.
+28. Do not include explanatory sections, repeated recommendations,
+    or alternative actions outside the schema.
+
 For every decision:
 - BUY requires a positive whole-share quantity.
 - SELL requires a positive whole-share quantity.
@@ -63,6 +79,12 @@ For every decision:
 - Provide a concise explanation grounded in the supplied data.
 
 Do not claim certainty about future stock prices.
+
+Before responding, verify:
+- Every symbol belongs to the supplied stock universe.
+- No symbol appears more than once.
+- Every action and quantity follows the rules.
+- The response matches the supplied JSON schema.
 
 Return only a response matching the supplied JSON schema.
 """

@@ -1,7 +1,12 @@
-
 import re
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from app.schemas.agent_decision import AgentTradeDecision
 
@@ -38,3 +43,20 @@ class LLMAgentDecisionOutput(BaseModel):
             raise ValueError("as_of_date must use YYYY-MM-DD format.")
 
         return value
+
+    @model_validator(mode="after")
+    def validate_unique_symbols(self):
+        symbols = [decision.symbol for decision in self.decisions]
+
+        duplicates = sorted({
+            symbol for symbol in symbols
+            if symbols.count(symbol) > 1
+        })
+
+        if duplicates:
+            raise ValueError(
+                "Each stock must appear only once in the decisions. "
+                f"Duplicate symbols: {', '.join(duplicates)}."
+            )
+
+        return self

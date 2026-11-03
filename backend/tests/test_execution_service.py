@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -23,7 +24,6 @@ from app.models import (
     Stock,
 )
 from app.services.brokerage import execution_service
-
 
 @pytest.fixture
 def db():
@@ -671,3 +671,89 @@ def test_order_not_executed_after_execution_deadline(
         order.scheduled_execution_at.replace(tzinfo=timezone.utc)
         == market_session["next_market_open"]
     )
+
+def test_database_rejects_duplicate_execution_for_order(
+    db,
+    trading_setup,
+    market_session,
+):
+    order = create_queued_order(
+        db,
+        trading_setup,
+        market_session,
+    )
+
+    first_execution = Execution(
+        order_id=order.id,
+        quantity=1,
+        execution_price=Decimal("100"),
+        fees=Decimal("0"),
+        slippage=Decimal("0"),
+    )
+
+    db.add(first_execution)
+    db.commit()
+
+    duplicate_execution = Execution(
+        order_id=order.id,
+        quantity=1,
+        execution_price=Decimal("101"),
+        fees=Decimal("0"),
+        slippage=Decimal("0"),
+    )
+
+    db.add(duplicate_execution)
+
+    with pytest.raises(IntegrityError):
+        db.commit()
+
+    db.rollback()
+
+    executions = get_executions(db)
+
+    assert len(executions) == 1
+    assert executions[0].order_id == order.id
+
+
+def test_repeated_execution_attempt_does_not_duplicate_fill(
+    db,
+    trading_setup,
+    market_session,
+    market_bar,
+    monkeypatch,
+):
+    setup = trading_setup
+    portfolio = setup["portfolio"]
+
+    order = create_queued_order(
+        db,
+        setup,
+        market_session,
+    )
+
+    monkeypatch.setattr(
+        execution_service,
+        "get_session_bar",
+        lambda db, order: market_bar,
+    )
+
+    first_result = execution_service.execute_queued_orders(
+        db,
+        setup["competition"].id,
+    )
+
+    cash_after_first_execution = portfolio.cash_balance
+
+    second_result = execution_service.execute_queued_orders(
+        db,
+        setup["competition"].id,
+    )
+
+    assert len(first_result) == 1
+    assert first_result[0].status == "filled"
+
+    assert second_result == []
+    assert order.status == "filled"
+
+    assert len(get_executions(db)) == 1
+    assert portfolio.cash_balance == cash_after_first_execution

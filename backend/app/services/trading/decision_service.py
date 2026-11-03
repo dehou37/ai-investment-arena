@@ -83,6 +83,7 @@ class DecisionOrchestrator:
         competition_id: UUID,
         agent_id: UUID,
         as_of_date: date,
+        commit: bool = True,
     ) -> tuple[AgentDecision, list]:
         """
         Generate an agent decision, validate it, and submit
@@ -130,6 +131,7 @@ class DecisionOrchestrator:
             competition_id=competition_id,
             agent_id=agent_id,
             orders=order_requests,
+            commit=commit,
         )
 
         return decision, created_orders

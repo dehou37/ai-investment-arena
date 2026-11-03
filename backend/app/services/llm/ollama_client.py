@@ -45,9 +45,11 @@ class OllamaClient:
             "model": self.model,
             "messages": messages,
             "stream": False,
+            "think": False,
             "format": response_schema.model_json_schema(),
             "options": {
                 "temperature": 0,
+                "num_ctx": 8192,
             },
         }
 

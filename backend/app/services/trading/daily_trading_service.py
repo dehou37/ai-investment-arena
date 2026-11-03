@@ -193,6 +193,7 @@ class DailyTradingCoordinator:
                             competition_id=competition_id,
                             agent_id=agent_id,
                             as_of_date=trading_date,
+                            commit=False,
                         )
                     )
 
@@ -201,6 +202,7 @@ class DailyTradingCoordinator:
                     schedule_orders(
                         db=db,
                         orders=orders,
+                        commit=False,
                     )
 
                 else:

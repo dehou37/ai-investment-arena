@@ -383,6 +383,7 @@ def submit_order_batch(
     competition_id,
     agent_id,
     orders,
+    commit: bool = True,
 ) -> list[Order]:
     """
     Validate and submit multiple orders atomically.
@@ -635,13 +636,17 @@ def submit_order_batch(
 
         # One flush and one commit for the entire batch.
         db.flush()
-        db.commit()
 
-        for order in created_orders:
-            db.refresh(order)
+        if commit:
+            db.commit()
+
+            for order in created_orders:
+                db.refresh(order)
 
         return created_orders
 
     except Exception:
-        db.rollback()
+        if commit:
+            db.rollback()
+
         raise

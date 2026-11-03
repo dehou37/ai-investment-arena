@@ -12,6 +12,7 @@ from app.services.trading.calendar_service import get_next_market_open
 def schedule_orders(
     db: Session,
     orders: list[Order],
+    commit: bool = True,
 ) -> list[Order]:
     """
     Schedule only the supplied pending orders.
@@ -39,15 +40,20 @@ def schedule_orders(
             )
             order.status = "queued"
 
-        db.commit()
+        db.flush()
 
-        for order in orders:
-            db.refresh(order)
+        if commit:
+            db.commit()
+
+            for order in orders:
+                db.refresh(order)
 
         return orders
 
     except Exception:
-        db.rollback()
+        if commit:
+            db.rollback()
+
         raise
 
 

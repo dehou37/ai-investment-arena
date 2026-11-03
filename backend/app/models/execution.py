@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     Numeric,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -76,5 +77,9 @@ class Execution(Base):
         CheckConstraint(
             "slippage >= 0",
             name="ck_execution_slippage_nonnegative",
+        ),
+        UniqueConstraint(
+            "order_id",
+            name="uq_execution_order_id",
         ),
     )

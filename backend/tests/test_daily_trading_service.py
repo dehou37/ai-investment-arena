@@ -17,6 +17,8 @@ from app.models import (
     AgentDailyRun,
     Competition,
     MarketSessionMonitor,
+    Order,
+    Portfolio,
     Stock,
 )
 from app.schemas.agent_decision import AgentDecision
@@ -179,6 +181,7 @@ def test_one_agent_failure_does_not_stop_other_agents(
         competition_id,
         agent_id,
         as_of_date,
+        commit=True,
     ):
         if agent_id == trading_setup["momentum_id"]:
             raise RuntimeError("Simulated agent failure")
@@ -830,3 +833,215 @@ def test_recovery_processes_only_ready_sessions(
 
     assert call.kwargs["trading_date"] == date(2026, 10, 29)
     assert call.kwargs["submit_orders"] is False
+
+
+def test_scheduling_failure_rolls_back_created_orders(
+    session_factory,
+    trading_setup,
+    successful_decision,
+    mock_calendar,
+    monkeypatch,
+):
+    from app.services.trading import daily_trading_service
+
+    # Create a stock and portfolio for the test agent.
+    with session_factory() as db:
+        stock = Stock(
+            symbol="NVDA",
+            name="NVIDIA",
+            exchange="NASDAQ",
+            asset_type="stock",
+            is_active=True,
+        )
+        db.add(stock)
+        db.flush()
+
+        portfolio = Portfolio(
+            agent_id=trading_setup["momentum_id"],
+            cash_balance=Decimal("10000"),
+        )
+        db.add(portfolio)
+        db.commit()
+
+        stock_id = stock.id
+        portfolio_id = portfolio.id
+
+    orchestrator = Mock()
+
+    def create_order(
+        db,
+        competition_id,
+        agent_id,
+        as_of_date,
+        commit=True,
+    ):
+        order = Order(
+            portfolio_id=portfolio_id,
+            stock_id=stock_id,
+            side="buy",
+            order_type="market",
+            quantity=1,
+            status="pending",
+            submitted_at=datetime.now(timezone.utc),
+        )
+
+        db.add(order)
+        db.flush()
+
+        return successful_decision, [order]
+
+    orchestrator.generate_and_submit_agent_orders.side_effect = (
+        create_order
+    )
+
+    def fail_during_scheduling(db, orders, commit=True):
+        for order in orders:
+            order.status = "queued"
+            order.scheduled_execution_at = datetime(
+                2026, 11, 3, 14, 30,
+                tzinfo=timezone.utc,
+            )
+
+        db.flush()
+
+        raise RuntimeError("Simulated scheduling failure")
+
+    monkeypatch.setattr(
+        daily_trading_service,
+        "schedule_orders",
+        fail_during_scheduling,
+    )
+
+    coordinator = DailyTradingCoordinator(
+        decision_orchestrator=orchestrator,
+        session_factory=session_factory,
+    )
+
+    result = coordinator._process_agent(
+        competition_id=trading_setup["competition_id"],
+        agent_id=trading_setup["momentum_id"],
+        trading_date=TRADING_DATE,
+        submit_orders=True,
+    )
+
+    assert result["status"] == "failed"
+    assert result["orders_created"] == 0
+    assert "Simulated scheduling failure" in result["error"]
+
+    with session_factory() as db:
+        runs = db.scalars(
+            select(AgentDailyRun).where(
+                AgentDailyRun.competition_id
+                == trading_setup["competition_id"],
+                AgentDailyRun.agent_id
+                == trading_setup["momentum_id"],
+                AgentDailyRun.trading_date == TRADING_DATE,
+            )
+        ).all()
+
+        orders = db.scalars(select(Order)).all()
+
+        assert len(runs) == 1
+        assert runs[0].status == "failed"
+        assert runs[0].orders_created == 0
+        assert "Simulated scheduling failure" in runs[0].error_message
+
+        # The inserted and scheduled order must have been rolled back.
+        assert orders == []
+
+def test_successful_daily_run_commits_order_and_decision_together(
+    session_factory,
+    trading_setup,
+    successful_decision,
+):
+    with session_factory() as db:
+        stock = Stock(
+            symbol="NVDA",
+            name="NVIDIA",
+            exchange="NASDAQ",
+            asset_type="stock",
+            is_active=True,
+        )
+        db.add(stock)
+        db.flush()
+
+        portfolio = Portfolio(
+            agent_id=trading_setup["momentum_id"],
+            cash_balance=Decimal("10000"),
+        )
+        db.add(portfolio)
+        db.commit()
+
+        stock_id = stock.id
+        portfolio_id = portfolio.id
+
+    orchestrator = Mock()
+
+    def create_order(
+        db,
+        competition_id,
+        agent_id,
+        as_of_date,
+        commit=True,
+    ):
+        order = Order(
+            portfolio_id=portfolio_id,
+            stock_id=stock_id,
+            side="buy",
+            order_type="market",
+            quantity=1,
+            status="pending",
+            submitted_at=datetime.now(timezone.utc),
+        )
+
+        db.add(order)
+        db.flush()
+
+        return successful_decision, [order]
+
+    orchestrator.generate_and_submit_agent_orders.side_effect = (
+        create_order
+    )
+
+    coordinator = DailyTradingCoordinator(
+        decision_orchestrator=orchestrator,
+        session_factory=session_factory,
+    )
+
+    result = coordinator._process_agent(
+        competition_id=trading_setup["competition_id"],
+        agent_id=trading_setup["momentum_id"],
+        trading_date=TRADING_DATE,
+        submit_orders=True,
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["orders_created"] == 1
+
+    with session_factory() as db:
+        daily_run = db.scalar(
+            select(AgentDailyRun).where(
+                AgentDailyRun.competition_id
+                == trading_setup["competition_id"],
+                AgentDailyRun.agent_id
+                == trading_setup["momentum_id"],
+                AgentDailyRun.trading_date == TRADING_DATE,
+            )
+        )
+
+        orders = db.scalars(
+            select(Order).where(
+                Order.portfolio_id == portfolio_id
+            )
+        ).all()
+
+        assert daily_run is not None
+        assert daily_run.status == "succeeded"
+        assert daily_run.orders_created == 1
+        assert daily_run.decision == successful_decision.model_dump(
+            mode="json"
+        )
+
+        assert len(orders) == 1
+        assert orders[0].status == "queued"
+        assert orders[0].scheduled_execution_at is not None
