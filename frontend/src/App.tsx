@@ -16,7 +16,7 @@ function App() {
   const [loadingBars, setLoadingBars] = useState(false);
   const [error, setError] = useState("");
   const [activePage, setActivePage] = useState<
-    "market" | "agents" | "leaderboard"
+    "market" | "agents" | "leaderboard" | "portfolios"
   >("market");
   useEffect(() => {
     async function loadStocks() {
@@ -143,8 +143,8 @@ function App() {
           </button>
 
           <button
-            className={`nav-item ${activePage === "agents" ? "active" : ""}`}
-            onClick={() => setActivePage("agents")}
+            className={`nav-item ${activePage === "portfolios" ? "active" : ""}`}
+            onClick={() => setActivePage("portfolios")}
           >
             Portfolios
           </button>
@@ -164,14 +164,18 @@ function App() {
                 ? "Market Overview"
                 : activePage === "agents"
                   ? "AI Agents"
-                  : "Leaderboard"}
+                  : activePage === "leaderboard"
+                    ? "Leaderboard"
+                    : "Portfolios"}
             </h1>
             <p>
               {activePage === "market"
                 ? "Monitor your tracked US stocks."
                 : activePage === "agents"
                   ? "Monitor your AI trading agents and their portfolios."
-                  : "Compare agent performance in the competition."}
+                  : activePage === "leaderboard"
+                    ? "Compare agent performance in the competition."
+                    : "Explore each agent’s portfolio and current holdings."}
             </p>
           </div>
           <div className="feed-badge">ALPACA · IEX FEED</div>
@@ -329,7 +333,11 @@ function App() {
           </>
           ) : (
             <AgentDashboard
-              mode={activePage === "agents" ? "agents" : "leaderboard"}
+              mode={activePage === "agents"
+                ? "agents"
+                : activePage === "leaderboard"
+                  ? "leaderboard"
+                  : "portfolios"}
             />
           )}
       </main>

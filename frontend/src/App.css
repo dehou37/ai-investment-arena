@@ -496,6 +496,33 @@ footer {
   background: #374151;
 }
 
+.dashboard-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.competition-select {
+  max-width: 260px;
+  padding: 9px 12px;
+  border: 1px solid #374151;
+  border-radius: 7px;
+  background: #0b1120;
+  color: #e5e7eb;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .agent-detail {
   margin-top: 0;
 }

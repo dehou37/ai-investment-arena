@@ -32,8 +32,8 @@ class AutonomousTradingService:
     1. Find completed NYSE sessions.
     2. Ensure market data is complete for each session.
     3. Stop at the first incomplete session.
-    4. Execute eligible queued orders for the current session.
-    5. Recover decisions for sessions with complete data.
+    4. Replay historical executions and decisions chronologically.
+    5. Run monitored execution as a final current-session safeguard.
 
     Ingestion and execution use separate database sessions.
     """
@@ -151,13 +151,20 @@ class AutonomousTradingService:
                 blocked_session = trading_date.isoformat()
                 break
 
-        # Attempt execution once, after ingestion.
-        # The execution service independently checks the market
-        # monitor, execution deadline, scheduled date and daily bars.
+        # Replay ready sessions first. The recovery service fills due
+        # orders from the exact historical session before generating
+        # decisions for that session.
+        recovery_result = self.recovery_service.recover_competition(
+            competition_id=competition_id,
+            ready_sessions=ready_sessions,
+        )
+
+        # Keep the normal monitored path as a safeguard, but only run it
+        # after historical replay and only with complete latest-session data.
         execution_result = None
         execution_error = None
 
-        if completed_sessions:
+        if completed_sessions and completed_sessions[-1] in ready_sessions:
             try:
                 with self.session_factory() as db:
                     executed_orders = self.execute_orders_fn(
@@ -171,14 +178,6 @@ class AutonomousTradingService:
 
             except Exception as exc:
                 execution_error = str(exc)
-
-        # Recover only sessions whose data has been verified.
-        # The recovery service retains its monitor and duplicate-run
-        # safeguards.
-        recovery_result = self.recovery_service.recover_competition(
-            competition_id=competition_id,
-            ready_sessions=ready_sessions,
-        )
 
         return {
             "competition_id": str(competition_id),

@@ -57,6 +57,12 @@ class AgentDailyRun(Base):
         nullable=False,
     )
 
+    attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        nullable=False,
+    )
+
     error_message: Mapped[str | None] = mapped_column(
         String(2000),
         nullable=True,
@@ -91,5 +97,9 @@ class AgentDailyRun(Base):
         CheckConstraint(
             "orders_created >= 0",
             name="ck_agent_daily_run_orders_nonnegative",
+        ),
+        CheckConstraint(
+            "attempt_count >= 1",
+            name="ck_agent_daily_run_attempt_count_positive",
         ),
     )

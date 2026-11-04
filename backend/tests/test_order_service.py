@@ -1,5 +1,5 @@
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 import app.models
 
+from app.api.dependencies import require_api_write_key
 from app.core.database import Base
 from app.core.config import settings
 from app.models import (
@@ -23,7 +24,10 @@ from app.models import (
     StockBar,
 )
 from app.schemas.order import OrderCreate
-from app.services.brokerage.order_service import submit_order_batch
+from app.services.brokerage.order_service import (
+    get_latest_close,
+    submit_order_batch,
+)
 from fastapi.testclient import TestClient
 
 from app.core.database import get_db
@@ -411,6 +415,7 @@ def test_batch_order_api_returns_created_orders(db, trading_setup):
         yield db
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[require_api_write_key] = lambda: None
 
     try:
         client = TestClient(app)
@@ -463,3 +468,47 @@ def test_batch_order_api_returns_created_orders(db, trading_setup):
 
     finally:
         app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(require_api_write_key, None)
+
+
+def test_historical_market_order_price_does_not_use_future_bars(
+    db,
+    trading_setup,
+):
+    stock = trading_setup["nvda"]
+    db.add_all([
+        StockBar(
+            stock_id=stock.id,
+            timestamp=datetime(2026, 10, 30, 20, tzinfo=timezone.utc),
+            timeframe="1Day",
+            open=Decimal("100"),
+            high=Decimal("100"),
+            low=Decimal("100"),
+            close=Decimal("100"),
+            volume=100,
+            provider="alpaca",
+            feed="iex",
+            adjustment="raw",
+        ),
+        StockBar(
+            stock_id=stock.id,
+            timestamp=datetime(2026, 11, 2, 20, tzinfo=timezone.utc),
+            timeframe="1Day",
+            open=Decimal("200"),
+            high=Decimal("200"),
+            low=Decimal("200"),
+            close=Decimal("200"),
+            volume=100,
+            provider="alpaca",
+            feed="iex",
+            adjustment="raw",
+        ),
+    ])
+    db.commit()
+
+    assert get_latest_close(
+        db,
+        stock.id,
+        as_of_date=date(2026, 10, 30),
+    ) == Decimal("100")
+    assert get_latest_close(db, stock.id) == Decimal("200")

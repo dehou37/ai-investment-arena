@@ -1,5 +1,6 @@
 
 from datetime import datetime, timezone
+from contextlib import contextmanager
 from decimal import Decimal
 
 import pytest
@@ -10,6 +11,8 @@ from sqlalchemy.pool import StaticPool
 
 import app.models
 
+from app.api.dependencies import require_api_write_key
+from app.services.trading import scheduler_service
 from app.core.database import Base, get_db
 from app.main import app
 from app.models import Competition, Stock
@@ -44,11 +47,21 @@ def db():
 
 
 @pytest.fixture
-def client(db):
+def client(db, monkeypatch):
     def override_get_db():
         yield db
 
+    @contextmanager
+    def lock_acquired():
+        yield True
+
+    monkeypatch.setattr(
+        scheduler_service,
+        "acquire_scheduler_lock",
+        lock_acquired,
+    )
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[require_api_write_key] = lambda: None
 
     with TestClient(app) as test_client:
         yield test_client

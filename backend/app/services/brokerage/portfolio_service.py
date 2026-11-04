@@ -15,9 +15,8 @@ from app.models import (
     Position,
     StockBar,
 )
+from app.core.config import settings
 
-DAILY_TIMEFRAME = "1Day"
-RAW_ADJUSTMENT = "raw"
 ZERO = Decimal("0")
 
 
@@ -144,8 +143,10 @@ def get_latest_raw_close(
         select(StockBar)
         .where(
             StockBar.stock_id == stock_id,
-            StockBar.timeframe == DAILY_TIMEFRAME,
-            StockBar.adjustment == RAW_ADJUSTMENT,
+            StockBar.timeframe == settings.ALPACA_TIMEFRAME,
+            StockBar.provider == settings.ALPACA_PROVIDER,
+            StockBar.feed == settings.ALPACA_FEED,
+            StockBar.adjustment == settings.ALPACA_ADJUSTMENT,
         )
     )
 
@@ -154,25 +155,9 @@ def get_latest_raw_close(
     if cutoff is not None:
         query = query.where(StockBar.timestamp < cutoff)
 
-    bars = db.scalars(
-        query.order_by(
-            StockBar.timestamp.desc(),
-            StockBar.provider.asc(),
-            StockBar.feed.asc(),
-        ).limit(10)
-    ).all()
-
-    if not bars:
-        return None
-
-    for bar in bars:
-        if (
-            bar.provider.lower() == "alpaca"
-            and bar.feed.lower() == "iex"
-        ):
-            return bar
-
-    return bars[0]
+    return db.scalar(
+        query.order_by(StockBar.timestamp.desc()).limit(1)
+    )
 
 
 def get_raw_close_for_session(
@@ -199,30 +184,17 @@ def get_raw_close_for_session(
         select(StockBar)
         .where(
             StockBar.stock_id == stock_id,
-            StockBar.timeframe == DAILY_TIMEFRAME,
-            StockBar.adjustment == RAW_ADJUSTMENT,
+            StockBar.timeframe == settings.ALPACA_TIMEFRAME,
+            StockBar.provider == settings.ALPACA_PROVIDER,
+            StockBar.feed == settings.ALPACA_FEED,
+            StockBar.adjustment == settings.ALPACA_ADJUSTMENT,
             StockBar.timestamp >= session_start,
             StockBar.timestamp < session_end,
         )
-        .order_by(
-            StockBar.provider.asc(),
-            StockBar.feed.asc(),
-        )
+        .order_by(StockBar.timestamp.desc())
     )
 
-    bars = db.scalars(query.limit(10)).all()
-
-    if not bars:
-        return None
-
-    for bar in bars:
-        if (
-            bar.provider.lower() == "alpaca"
-            and bar.feed.lower() == "iex"
-        ):
-            return bar
-
-    return bars[0]
+    return db.scalar(query.limit(1))
 
 
 def calculate_portfolio_valuation(

@@ -218,7 +218,8 @@ def test_incomplete_session_stops_later_sessions(
     ]
 
     ingestion.assert_called_once()
-    execute_orders.assert_called_once()
+    # Do not execute live orders when the newest session is incomplete.
+    execute_orders.assert_not_called()
 
     autonomous.recovery_service.recover_competition.assert_called_once_with(
         competition_id=autonomous_setup,

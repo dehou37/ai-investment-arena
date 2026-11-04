@@ -1,5 +1,5 @@
 
-from datetime import date
+from datetime import date, datetime
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -84,6 +84,7 @@ class DecisionOrchestrator:
         agent_id: UUID,
         as_of_date: date,
         commit: bool = True,
+        submitted_at: datetime | None = None,
     ) -> tuple[AgentDecision, list]:
         """
         Generate an agent decision, validate it, and submit
@@ -104,7 +105,31 @@ class DecisionOrchestrator:
             as_of_date=as_of_date,
         )
 
-        # 2. Convert actionable decisions into market orders.
+        orders = self.submit_decision_orders(
+            db=db,
+            competition_id=competition_id,
+            agent_id=agent_id,
+            decision=decision,
+            as_of_date=as_of_date,
+            submitted_at=submitted_at,
+            commit=commit,
+        )
+
+        return decision, orders
+
+    def submit_decision_orders(
+        self,
+        db: Session,
+        competition_id: UUID,
+        agent_id: UUID,
+        decision: AgentDecision,
+        as_of_date: date,
+        submitted_at: datetime | None = None,
+        commit: bool = True,
+    ) -> list:
+        """Submit the actionable orders in an already-approved decision."""
+
+        # Convert actionable decisions into market orders.
         order_requests = []
 
         for trade in decision.decisions:
@@ -123,7 +148,7 @@ class DecisionOrchestrator:
 
         # 3. Nothing to submit if the agent only chose HOLD.
         if not order_requests:
-            return decision, []
+            return []
 
         # 4. Submit all orders atomically.
         created_orders = submit_order_batch(
@@ -132,6 +157,8 @@ class DecisionOrchestrator:
             agent_id=agent_id,
             orders=order_requests,
             commit=commit,
+            submitted_at=submitted_at,
+            as_of_date=as_of_date,
         )
 
-        return decision, created_orders
+        return created_orders

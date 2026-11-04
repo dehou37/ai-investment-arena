@@ -60,8 +60,22 @@ export interface PortfolioResponse {
   positions: PositionValuation[];
 }
 
+export interface CompetitionSummary {
+  id: string;
+  name: string;
+  status: string;
+  initial_cash: string;
+}
+
 export async function getStocks(): Promise<Stock[]> {
   const response = await api.get<Stock[]>("/api/stocks");
+  return response.data;
+}
+
+export async function getCompetitions(): Promise<CompetitionSummary[]> {
+  const response = await api.get<CompetitionSummary[]>(
+    "/api/competitions",
+  );
   return response.data;
 }
 

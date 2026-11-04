@@ -1,10 +1,63 @@
 
 import asyncio
+from contextlib import contextmanager
 from unittest.mock import Mock
 
 import pytest
+from fastapi import HTTPException
 
 from app import main
+from app.services.trading import scheduler_service
+
+
+@contextmanager
+def lock_acquired():
+    yield True
+
+
+def test_health_endpoint_is_liveness_only():
+    assert asyncio.run(main.health()) == {"status": "healthy"}
+
+
+def test_readiness_reports_database_health(monkeypatch):
+    db = Mock()
+    session_context = Mock()
+    session_context.__enter__ = Mock(return_value=db)
+    session_context.__exit__ = Mock(return_value=False)
+    monkeypatch.setattr(
+        main,
+        "SessionLocal",
+        Mock(return_value=session_context),
+    )
+
+    result = asyncio.run(main.readiness())
+
+    assert result == {
+        "status": "ready",
+        "dependencies": {"database": "healthy"},
+    }
+    db.execute.assert_called_once()
+
+
+def test_readiness_returns_service_unavailable_when_database_fails(
+    monkeypatch,
+):
+    db = Mock()
+    db.execute.side_effect = RuntimeError("database is unavailable")
+    session_context = Mock()
+    session_context.__enter__ = Mock(return_value=db)
+    session_context.__exit__ = Mock(return_value=False)
+    monkeypatch.setattr(
+        main,
+        "SessionLocal",
+        Mock(return_value=session_context),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(main.readiness())
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail["status"] == "not_ready"
 
 
 class FakeOllamaClient:
@@ -40,6 +93,11 @@ class FakeAutonomousTradingService:
 
 
 def configure_lifecycle_mocks(monkeypatch):
+    monkeypatch.setattr(
+        scheduler_service,
+        "acquire_scheduler_lock",
+        lock_acquired,
+    )
     ollama_clients = []
     alpaca_clients = []
     autonomous_services = []

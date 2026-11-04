@@ -1,4 +1,5 @@
 
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import HTTPException, status
@@ -30,23 +31,31 @@ OPEN_ORDER_STATUSES = [
 def get_latest_close(
     db: Session,
     stock_id,
+    as_of_date: date | None = None,
 ) -> Decimal:
     """
     Get the most recent stored raw Alpaca closing price
     using the configured feed and timeframe.
     """
 
-    latest_bar = db.scalar(
-        select(StockBar)
-        .where(
+    query = select(StockBar).where(
             StockBar.stock_id == stock_id,
             StockBar.timeframe == settings.ALPACA_TIMEFRAME,
             StockBar.provider == settings.ALPACA_PROVIDER,
             StockBar.feed == settings.ALPACA_FEED,
             StockBar.adjustment == settings.ALPACA_ADJUSTMENT,
         )
-        .order_by(StockBar.timestamp.desc())
-        .limit(1)
+
+    if as_of_date is not None:
+        cutoff = datetime.combine(
+            as_of_date + timedelta(days=1),
+            time.min,
+            tzinfo=timezone.utc,
+        )
+        query = query.where(StockBar.timestamp < cutoff)
+
+    latest_bar = db.scalar(
+        query.order_by(StockBar.timestamp.desc()).limit(1)
     )
 
     if latest_bar is None or latest_bar.close <= 0:
@@ -64,6 +73,7 @@ def get_estimated_buy_reservation(
     order_type: str,
     quantity: int,
     limit_price=None,
+    as_of_date: date | None = None,
 ) -> Decimal:
     """
     Estimate the cash reservation for a buy order.
@@ -88,6 +98,7 @@ def get_estimated_buy_reservation(
         latest_close = get_latest_close(
             db,
             stock_id,
+            as_of_date=as_of_date,
         )
 
         estimated_cost = (
@@ -115,6 +126,7 @@ def get_remaining_order_quantity(order: Order) -> int:
 def get_reserved_buying_power(
     db: Session,
     portfolio_id,
+    as_of_date: date | None = None,
 ) -> Decimal:
     """
     Estimate cash committed to outstanding buy orders.
@@ -147,6 +159,7 @@ def get_reserved_buying_power(
             order_type=order.order_type,
             quantity=remaining_quantity,
             limit_price=order.limit_price,
+            as_of_date=as_of_date,
         )
 
     return reserved_cash
@@ -384,6 +397,8 @@ def submit_order_batch(
     agent_id,
     orders,
     commit: bool = True,
+    submitted_at: datetime | None = None,
+    as_of_date: date | None = None,
 ) -> list[Order]:
     """
     Validate and submit multiple orders atomically.
@@ -515,6 +530,7 @@ def submit_order_batch(
         reserved_cash = get_reserved_buying_power(
             db,
             portfolio.id,
+            as_of_date=as_of_date,
         )
 
         available_cash = (
@@ -543,6 +559,7 @@ def submit_order_batch(
                         order_type=order_data.order_type,
                         quantity=order_data.quantity,
                         limit_price=order_data.limit_price,
+                        as_of_date=as_of_date,
                     )
                 )
 
@@ -621,14 +638,20 @@ def submit_order_batch(
                 order_data.stock_symbol
             ]
 
+            order_values = {
+                "portfolio_id": portfolio.id,
+                "stock_id": stock.id,
+                "side": order_data.side,
+                "order_type": order_data.order_type,
+                "quantity": order_data.quantity,
+                "limit_price": order_data.limit_price,
+                "status": "pending",
+            }
+            if submitted_at is not None:
+                order_values["submitted_at"] = submitted_at
+
             order = Order(
-                portfolio_id=portfolio.id,
-                stock_id=stock.id,
-                side=order_data.side,
-                order_type=order_data.order_type,
-                quantity=order_data.quantity,
-                limit_price=order_data.limit_price,
-                status="pending",
+                **order_values,
             )
 
             db.add(order)

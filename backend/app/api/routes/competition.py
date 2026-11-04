@@ -7,6 +7,7 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
+from app.api.dependencies import require_api_write_key
 from app.models import (
     Agent,
     Competition,
@@ -98,6 +99,7 @@ def get_competition_query():
     "",
     response_model=CompetitionResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_api_write_key)],
 )
 def create_competition(
     competition_data: CompetitionCreate,
@@ -252,6 +254,7 @@ def get_competition(
     "/{competition_id}/agents",
     response_model=AgentResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_api_write_key)],
 )
 def add_competition_agent(
     competition_id: UUID,
@@ -349,6 +352,7 @@ def add_competition_agent(
 @router.post(
     "/{competition_id}/start",
     response_model=CompetitionResponse,
+    dependencies=[Depends(require_api_write_key)],
 )
 def start_competition(
     competition_id: UUID,
@@ -464,6 +468,7 @@ def start_competition(
 @router.post(
     "/{competition_id}/complete",
     response_model=CompetitionResponse,
+    dependencies=[Depends(require_api_write_key)],
 )
 def complete_competition(
     competition_id: UUID,

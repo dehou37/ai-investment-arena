@@ -1,5 +1,5 @@
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -244,6 +244,7 @@ def execute_buy_order(
     portfolio: Portfolio,
     execution_price: Decimal,
     slippage_cost: Decimal,
+    executed_at: datetime | None = None,
 ):
     """Execute a buy order and update cash and holdings."""
 
@@ -305,7 +306,7 @@ def execute_buy_order(
         execution_price=execution_price,
         fees=fees,
         slippage=slippage_cost,
-        executed_at=datetime.now(timezone.utc),
+        executed_at=executed_at or datetime.now(timezone.utc),
     )
 
 
@@ -315,6 +316,7 @@ def execute_sell_order(
     portfolio: Portfolio,
     execution_price: Decimal,
     slippage_cost: Decimal,
+    executed_at: datetime | None = None,
 ):
     """Execute a sell order and update cash and holdings."""
 
@@ -352,13 +354,14 @@ def execute_sell_order(
         execution_price=execution_price,
         fees=fees,
         slippage=slippage_cost,
-        executed_at=datetime.now(timezone.utc),
+        executed_at=executed_at or datetime.now(timezone.utc),
     )
 
 
 def execute_queued_orders(
     db: Session,
     competition_id: UUID,
+    historical_session_date: date | None = None,
 ) -> list[Order]:
     """
     Execute eligible queued orders belonging to a competition.
@@ -366,7 +369,14 @@ def execute_queued_orders(
     Missed-session protection:
         Orders scheduled for an earlier NYSE date are rescheduled
         to the next eligible market open. They are never filled
-        using the missed session's historical daily bar.
+        using the missed session's historical daily bar during normal
+        execution. Historical fills require historical_session_date.
+
+    Historical replay:
+        When historical_session_date is supplied, fill only orders due
+        on that NYSE session, using that session's stored daily bar. The
+        fill timestamp is the historical market open, and monitoring
+        records are not required.
 
     Current-session orders:
         Execute only after the NYSE session closes and matching
@@ -405,6 +415,25 @@ def execute_queued_orders(
     now = datetime.now(timezone.utc)
     current_ny_date = now.astimezone(NEW_YORK).date()
 
+    replay_session_close = None
+    if historical_session_date is not None:
+        replay_session_close = get_market_session_close(
+            historical_session_date
+        )
+        if replay_session_close is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Historical replay date is not an NYSE session.",
+            )
+        replay_session_close = _as_utc(replay_session_close)
+        if now < replay_session_close:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot replay a market session before its close.",
+            )
+
+    due_by = replay_session_close or now
+
     # 2. Retrieve queued orders for this competition.
 
     queued_orders = db.scalars(
@@ -420,7 +449,7 @@ def execute_queued_orders(
         .where(
             Agent.competition_id == competition_id,
             Order.status == "queued",
-            Order.scheduled_execution_at <= now,
+            Order.scheduled_execution_at <= due_by,
         )
         .order_by(
             Order.scheduled_execution_at.asc(),
@@ -452,26 +481,21 @@ def execute_queued_orders(
 
             session_date = get_order_session_date(order)
 
-            # 5. Protect against missed historical sessions.
-            #
-            # Never fill an order using a daily bar from a
-            # previous NYSE session.
+            if historical_session_date is not None:
+                if session_date != historical_session_date:
+                    continue
+            else:
+                # Missed-session protection for normal execution.
+                # Historical replay is an explicit simulation-only path.
+                if session_date < current_ny_date:
+                    order.scheduled_execution_at = (
+                        get_next_market_open(now)
+                    )
+                    processed_orders.append(order)
+                    continue
 
-            if session_date < current_ny_date:
-
-                order.scheduled_execution_at = (
-                    get_next_market_open(now)
-                )
-
-                processed_orders.append(order)
-
-                continue
-
-            # Do not execute an order scheduled for a future
-            # NYSE session.
-
-            if session_date > current_ny_date:
-                continue
+                if session_date > current_ny_date:
+                    continue
 
             # 6. Verify the current market session has closed.
 
@@ -484,27 +508,28 @@ def execute_queued_orders(
 
             session_close = _as_utc(session_close)
 
-            if now < session_close:
+            if historical_session_date is None and now < session_close:
                 continue
 
             # 7. Verify the session was monitored before
             # market open and that heartbeat continuity
             # is still within the permitted limit.
 
-            eligible, reason = validate_session_execution_eligibility(
-                db=db,
-                session_date=session_date,
-                now=now,
-            )
-
-            if not eligible:
-                order.scheduled_execution_at = (
-                    get_next_market_open(now)
+            if historical_session_date is None:
+                eligible, reason = validate_session_execution_eligibility(
+                    db=db,
+                    session_date=session_date,
+                    now=now,
                 )
 
-                processed_orders.append(order)
+                if not eligible:
+                    order.scheduled_execution_at = (
+                        get_next_market_open(now)
+                    )
 
-                continue
+                    processed_orders.append(order)
+
+                    continue
 
             # 8. Retrieve the daily market bar.
 
@@ -532,7 +557,9 @@ def execute_queued_orders(
             if execution_price is None:
 
                 order.scheduled_execution_at = (
-                    get_next_market_open(now)
+                    get_next_market_open(
+                        replay_session_close or now
+                    )
                 )
 
                 processed_orders.append(order)
@@ -549,6 +576,11 @@ def execute_queued_orders(
                     portfolio=portfolio,
                     execution_price=execution_price,
                     slippage_cost=slippage_cost,
+                    executed_at=(
+                        get_market_session_open(session_date)
+                        if historical_session_date is not None
+                        else None
+                    ),
                 )
 
             else:
@@ -559,6 +591,11 @@ def execute_queued_orders(
                     portfolio=portfolio,
                     execution_price=execution_price,
                     slippage_cost=slippage_cost,
+                    executed_at=(
+                        get_market_session_open(session_date)
+                        if historical_session_date is not None
+                        else None
+                    ),
                 )
 
             # 11. Record successful execution or rejection.

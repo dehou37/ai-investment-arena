@@ -3,8 +3,9 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.api.routes.market_data import router as market_data_router
 from app.api.routes.competition import router as competitions_router
@@ -14,6 +15,7 @@ from app.api.routes import snapshots
 
 from app.services.llm.ollama_client import OllamaClient
 from app.services.market_data.alpaca import AlpacaMarketDataClient
+from app.services.brokerage.execution_service import execute_queued_orders
 
 from app.services.trading.decision_service import DecisionOrchestrator
 from app.services.trading.daily_trading_service import (
@@ -32,6 +34,7 @@ from app.services.trading.scheduler_service import (
     DailyTradingSchedulerService,
 )
 from app.api.routes.activity import router as activity_router
+from app.core.database import SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +65,7 @@ async def lifespan(app: FastAPI):
 
         daily_trading_recovery_service = DailyTradingRecoveryService(
             coordinator=daily_trading_coordinator,
+            execute_historical_orders_fn=execute_queued_orders,
         )
 
         autonomous_trading_service = AutonomousTradingService(
@@ -105,7 +109,7 @@ async def lifespan(app: FastAPI):
         # Startup recovery uses the complete autonomous workflow.
         try:
             recovery_result = await asyncio.to_thread(
-                autonomous_trading_service.run_all_active_competitions
+                daily_trading_scheduler_service.run_once
             )
 
             logger.info(
@@ -192,4 +196,27 @@ async def root():
 
 @app.get("/health")
 async def health():
+    """Liveness probe: the application process is responsive."""
     return {"status": "healthy"}
+
+
+@app.get("/ready")
+async def readiness():
+    """Readiness probe: required database access is available."""
+    try:
+        with SessionLocal() as db:
+            db.execute(text("SELECT 1"))
+    except Exception as exc:
+        logger.exception("Readiness check failed.")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "not_ready",
+                "dependencies": {"database": "unavailable"},
+            },
+        ) from exc
+
+    return {
+        "status": "ready",
+        "dependencies": {"database": "healthy"},
+    }

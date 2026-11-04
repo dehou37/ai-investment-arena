@@ -757,3 +757,48 @@ def test_repeated_execution_attempt_does_not_duplicate_fill(
 
     assert len(get_executions(db)) == 1
     assert portfolio.cash_balance == cash_after_first_execution
+
+
+def test_historical_replay_fills_due_order_without_session_monitor(
+    db,
+    trading_setup,
+    market_session,
+    market_bar,
+    monkeypatch,
+):
+    setup = trading_setup
+    order = create_queued_order(
+        db,
+        setup,
+        market_session,
+        side="buy",
+        quantity=1,
+    )
+
+    monitor = db.scalar(
+        select(MarketSessionMonitor).where(
+            MarketSessionMonitor.session_date
+            == market_session["session_date"]
+        )
+    )
+    db.delete(monitor)
+    db.commit()
+
+    monkeypatch.setattr(
+        execution_service,
+        "get_session_bar",
+        lambda db, order: market_bar,
+    )
+
+    result = execution_service.execute_queued_orders(
+        db,
+        setup["competition"].id,
+        historical_session_date=market_session["session_date"],
+    )
+
+    assert len(result) == 1
+    assert result[0].id == order.id
+    assert order.status == "filled"
+    assert get_executions(db)[0].executed_at.replace(
+        tzinfo=timezone.utc
+    ) == market_session["session_open"]

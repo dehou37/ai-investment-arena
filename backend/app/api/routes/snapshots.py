@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.api.dependencies import require_api_write_key
 from app.schemas.portfolio_snapshot import (
     AgentSnapshotHistoryResponse,
     SnapshotCreationResponse,
@@ -29,6 +30,7 @@ router = APIRouter(
 @router.post(
     "/{competition_id}/snapshots",
     response_model=SnapshotCreationResponse,
+    dependencies=[Depends(require_api_write_key)],
 )
 def create_snapshots(
     competition_id: UUID,

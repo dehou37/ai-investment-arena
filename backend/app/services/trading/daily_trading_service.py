@@ -1,5 +1,5 @@
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -9,9 +9,13 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.database import SessionLocal
 from app.models import Agent, AgentDailyRun, Competition
+from app.schemas.agent_decision import AgentDecision
 from app.services.brokerage.scheduling_service import schedule_orders
 from app.services.trading.calendar_service import get_market_session_close
 from app.services.trading.decision_service import DecisionOrchestrator
+
+MAX_DAILY_RUN_ATTEMPTS = 3
+STALE_DAILY_RUN_TIMEOUT = timedelta(minutes=30)
 
 class DailyTradingError(Exception):
     """Raised when a daily trading operation cannot be completed."""
@@ -30,6 +34,7 @@ class DailyTradingCoordinator:
         competition_id: UUID,
         trading_date: date,
         submit_orders: bool = True,
+        historical_replay: bool = False,
     ) -> dict[str, Any]:
         """
         Process every active agent for one completed NYSE session.
@@ -39,8 +44,11 @@ class DailyTradingCoordinator:
 
         submit_orders=False:
             Generate and record decisions only. No orders are submitted.
-            This is intended for historical sessions missed while the
-            application or computer was offline.
+            This is for analysis-only runs, not missed-session replay.
+
+        historical_replay=True:
+            Treat the decision as generated at the session close and
+            schedule its orders for the next NYSE open.
         """
 
         session_close = get_market_session_close(trading_date)
@@ -94,6 +102,8 @@ class DailyTradingCoordinator:
                 agent_id=agent_id,
                 trading_date=trading_date,
                 submit_orders=submit_orders,
+                historical_replay=historical_replay,
+                submitted_at=(session_close if historical_replay else None),
             )
             results.append(result)
 
@@ -127,6 +137,8 @@ class DailyTradingCoordinator:
         agent_id: UUID,
         trading_date: date,
         submit_orders: bool,
+        historical_replay: bool = False,
+        submitted_at: datetime | None = None,
     ) -> dict[str, Any]:
         """
         Process one agent in its own database session.
@@ -134,9 +146,11 @@ class DailyTradingCoordinator:
         A unique AgentDailyRun record prevents the same agent from
         being processed twice for the same competition session.
 
-        Existing running, succeeded, or failed records are not retried
-        automatically.
+        Running and succeeded records are never retried. Failed records
+        are retried up to MAX_DAILY_RUN_ATTEMPTS total attempts.
         """
+
+        replay_decision = None
 
         with self.session_factory() as db:
             daily_run = AgentDailyRun(
@@ -144,6 +158,7 @@ class DailyTradingCoordinator:
                 agent_id=agent_id,
                 trading_date=trading_date,
                 status="running",
+                attempt_count=1,
                 started_at=datetime.now(timezone.utc),
             )
 
@@ -161,39 +176,127 @@ class DailyTradingCoordinator:
                         AgentDailyRun.competition_id == competition_id,
                         AgentDailyRun.agent_id == agent_id,
                         AgentDailyRun.trading_date == trading_date,
-                    )
+                    ).with_for_update()
                 )
 
-                return {
-                    "agent_id": str(agent_id),
-                    "trading_date": trading_date.isoformat(),
-                    "status": "skipped",
-                    "reason": (
-                        "A daily run already exists for this agent "
-                        "and trading session."
-                    ),
-                    "existing_status": (
-                        existing_run.status
-                        if existing_run is not None
-                        else None
-                    ),
-                    "orders_created": (
-                        existing_run.orders_created
-                        if existing_run is not None
-                        else 0
-                    ),
-                }
+                is_stale_running = (
+                    existing_run is not None
+                    and existing_run.status == "running"
+                    and self._is_stale_run(existing_run.started_at)
+                )
+                is_retryable = (
+                    existing_run is not None
+                    and (
+                        existing_run.status == "failed"
+                        or is_stale_running
+                    )
+                    and existing_run.attempt_count
+                    < MAX_DAILY_RUN_ATTEMPTS
+                )
+
+                if is_retryable:
+                    if (
+                        historical_replay
+                        and self._decision_has_actionable_trades(
+                            existing_run.decision
+                        )
+                    ):
+                        replay_decision = AgentDecision.model_validate(
+                            existing_run.decision
+                        )
+
+                    existing_run.status = "running"
+                    existing_run.attempt_count += 1
+                    existing_run.started_at = datetime.now(timezone.utc)
+                    existing_run.completed_at = None
+                    existing_run.error_message = None
+                    if replay_decision is None:
+                        existing_run.decision = None
+                        existing_run.orders_created = 0
+                    db.commit()
+                    daily_run = existing_run
+                elif (
+                    historical_replay
+                    and existing_run is not None
+                    and existing_run.status == "succeeded"
+                    and existing_run.orders_created == 0
+                    and self._decision_has_actionable_trades(
+                        existing_run.decision
+                    )
+                ):
+                    replay_decision = AgentDecision.model_validate(
+                        existing_run.decision
+                    )
+                    existing_run.status = "running"
+                    existing_run.started_at = datetime.now(timezone.utc)
+                    existing_run.completed_at = None
+                    existing_run.error_message = None
+                    db.commit()
+                    daily_run = existing_run
+                else:
+                    return {
+                        "agent_id": str(agent_id),
+                        "trading_date": trading_date.isoformat(),
+                        "status": "skipped",
+                        "reason": (
+                            "A daily run already exists for this agent "
+                            "and trading session."
+                        ),
+                        "existing_status": (
+                            existing_run.status
+                            if existing_run is not None
+                            else None
+                        ),
+                        "attempt_count": (
+                            existing_run.attempt_count
+                            if existing_run is not None
+                            else 0
+                        ),
+                        "orders_created": (
+                            existing_run.orders_created
+                            if existing_run is not None
+                            else 0
+                        ),
+                    }
 
             try:
-                if submit_orders:
-                    decision, orders = (
+                if replay_decision is not None:
+                    decision = replay_decision
+                    orders = (
                         self.decision_orchestrator
-                        .generate_and_submit_agent_orders(
+                        .submit_decision_orders(
                             db=db,
                             competition_id=competition_id,
                             agent_id=agent_id,
+                            decision=decision,
                             as_of_date=trading_date,
+                            submitted_at=submitted_at,
                             commit=False,
+                        )
+                    )
+                    schedule_orders(
+                        db=db,
+                        orders=orders,
+                        commit=False,
+                    )
+
+                elif submit_orders:
+                    order_submission_options = {
+                        "db": db,
+                        "competition_id": competition_id,
+                        "agent_id": agent_id,
+                        "as_of_date": trading_date,
+                        "commit": False,
+                    }
+                    if submitted_at is not None:
+                        order_submission_options["submitted_at"] = (
+                            submitted_at
+                        )
+
+                    decision, orders = (
+                        self.decision_orchestrator
+                        .generate_and_submit_agent_orders(
+                            **order_submission_options,
                         )
                     )
 
@@ -234,6 +337,7 @@ class DailyTradingCoordinator:
                     "trading_date": trading_date.isoformat(),
                     "status": "succeeded",
                     "orders_created": len(orders),
+                    "attempt_count": daily_run.attempt_count,
                     "decision_summary": decision.summary,
                     "submit_orders": submit_orders,
                 }
@@ -264,5 +368,33 @@ class DailyTradingCoordinator:
                     "status": "failed",
                     "error": str(exc),
                     "orders_created": 0,
+                    "attempt_count": (
+                        daily_run.attempt_count
+                        if daily_run is not None
+                        else 0
+                    ),
                     "submit_orders": submit_orders,
                 }
+
+    @staticmethod
+    def _decision_has_actionable_trades(
+        decision: dict[str, Any] | None,
+    ) -> bool:
+        if not isinstance(decision, dict):
+            return False
+
+        trades = decision.get("decisions", [])
+        return any(
+            isinstance(trade, dict)
+            and trade.get("action") in {"buy", "sell"}
+            for trade in trades
+        )
+
+    @staticmethod
+    def _is_stale_run(started_at: datetime) -> bool:
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+
+        return started_at <= (
+            datetime.now(timezone.utc) - STALE_DAILY_RUN_TIMEOUT
+        )

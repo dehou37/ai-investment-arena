@@ -3,6 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     APP_ENV: str = "development"
+    API_WRITE_KEY: str | None = None
 
     # Alpaca
     ALPACA_API_KEY: str

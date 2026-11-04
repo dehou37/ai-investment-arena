@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.api.dependencies import require_api_write_key
 
 from app.services.brokerage.order_service import (
     submit_order,
@@ -32,6 +33,7 @@ router = APIRouter(
     "/{competition_id}/agents/{agent_id}/orders",
     response_model=OrderResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_api_write_key)],
 )
 def create_order(
     competition_id: UUID,
@@ -50,6 +52,7 @@ def create_order(
     "/{competition_id}/agents/{agent_id}/orders/batch",
     response_model=list[OrderResponse],
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_api_write_key)],
 )
 def create_order_batch(
     competition_id: UUID,
@@ -69,6 +72,7 @@ def create_order_batch(
 @router.post(
     "/{competition_id}/orders/schedule",
     response_model=list[OrderResponse],
+    dependencies=[Depends(require_api_write_key)],
 )
 def schedule_orders(
     competition_id: UUID,
@@ -83,6 +87,7 @@ def schedule_orders(
 @router.post(
     "/{competition_id}/orders/execute",
     response_model=list[OrderResponse],
+    dependencies=[Depends(require_api_write_key)],
 )
 def execute_orders(
     competition_id: UUID,

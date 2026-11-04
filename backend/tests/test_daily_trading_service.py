@@ -1,5 +1,5 @@
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import Mock
 from uuid import uuid4
@@ -168,6 +168,37 @@ def test_successfully_processes_all_active_agents(
         assert all(run.completed_at is not None for run in runs)
 
 
+def test_historical_replay_timestamps_orders_at_session_close(
+    session_factory,
+    trading_setup,
+    successful_decision,
+    mock_calendar,
+):
+    orchestrator = Mock()
+    orchestrator.generate_and_submit_agent_orders.return_value = (
+        successful_decision,
+        [],
+    )
+    coordinator = DailyTradingCoordinator(
+        decision_orchestrator=orchestrator,
+        session_factory=session_factory,
+    )
+
+    result = coordinator.run_competition_for_session(
+        competition_id=trading_setup["competition_id"],
+        trading_date=TRADING_DATE,
+        submit_orders=True,
+        historical_replay=True,
+    )
+
+    assert result["succeeded"] == 2
+    for call in orchestrator.generate_and_submit_agent_orders.call_args_list:
+        assert call.kwargs["as_of_date"] == TRADING_DATE
+        assert call.kwargs["submitted_at"] == datetime(
+            2026, 10, 30, 20, 0, tzinfo=timezone.utc
+        )
+
+
 def test_one_agent_failure_does_not_stop_other_agents(
     session_factory,
     trading_setup,
@@ -286,6 +317,208 @@ def test_existing_daily_run_is_skipped(
     assert call_agent_id == trading_setup["warren_id"]
 
 
+def test_failed_daily_run_retries_and_records_attempt_count(
+    session_factory,
+    trading_setup,
+    successful_decision,
+):
+    with session_factory() as db:
+        db.add(
+            AgentDailyRun(
+                competition_id=trading_setup["competition_id"],
+                agent_id=trading_setup["momentum_id"],
+                trading_date=TRADING_DATE,
+                status="failed",
+                attempt_count=1,
+                error_message="Temporary provider failure",
+                started_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(timezone.utc),
+            )
+        )
+        db.commit()
+
+    orchestrator = Mock()
+    orchestrator.generate_and_submit_agent_orders.return_value = (
+        successful_decision,
+        [],
+    )
+    coordinator = DailyTradingCoordinator(
+        decision_orchestrator=orchestrator,
+        session_factory=session_factory,
+    )
+
+    result = coordinator._process_agent(
+        competition_id=trading_setup["competition_id"],
+        agent_id=trading_setup["momentum_id"],
+        trading_date=TRADING_DATE,
+        submit_orders=True,
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["attempt_count"] == 2
+    orchestrator.generate_and_submit_agent_orders.assert_called_once()
+
+    with session_factory() as db:
+        run = db.scalar(
+            select(AgentDailyRun).where(
+                AgentDailyRun.competition_id
+                == trading_setup["competition_id"],
+                AgentDailyRun.agent_id == trading_setup["momentum_id"],
+                AgentDailyRun.trading_date == TRADING_DATE,
+            )
+        )
+        assert run.status == "succeeded"
+        assert run.attempt_count == 2
+        assert run.error_message is None
+
+
+def test_failed_daily_run_is_skipped_after_maximum_attempts(
+    session_factory,
+    trading_setup,
+):
+    from app.services.trading.daily_trading_service import (
+        MAX_DAILY_RUN_ATTEMPTS,
+    )
+
+    with session_factory() as db:
+        db.add(
+            AgentDailyRun(
+                competition_id=trading_setup["competition_id"],
+                agent_id=trading_setup["momentum_id"],
+                trading_date=TRADING_DATE,
+                status="failed",
+                attempt_count=MAX_DAILY_RUN_ATTEMPTS,
+                error_message="Still failing",
+                started_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(timezone.utc),
+            )
+        )
+        db.commit()
+
+    orchestrator = Mock()
+    coordinator = DailyTradingCoordinator(
+        decision_orchestrator=orchestrator,
+        session_factory=session_factory,
+    )
+
+    result = coordinator._process_agent(
+        competition_id=trading_setup["competition_id"],
+        agent_id=trading_setup["momentum_id"],
+        trading_date=TRADING_DATE,
+        submit_orders=True,
+    )
+
+    assert result["status"] == "skipped"
+    assert result["attempt_count"] == MAX_DAILY_RUN_ATTEMPTS
+    orchestrator.generate_and_submit_agent_orders.assert_not_called()
+
+
+def test_stale_running_daily_run_is_reclaimed(
+    session_factory,
+    trading_setup,
+    successful_decision,
+):
+    from app.services.trading.daily_trading_service import (
+        STALE_DAILY_RUN_TIMEOUT,
+    )
+
+    with session_factory() as db:
+        db.add(
+            AgentDailyRun(
+                competition_id=trading_setup["competition_id"],
+                agent_id=trading_setup["momentum_id"],
+                trading_date=TRADING_DATE,
+                status="running",
+                attempt_count=1,
+                started_at=(
+                    datetime.now(timezone.utc)
+                    - STALE_DAILY_RUN_TIMEOUT
+                    - timedelta(minutes=1)
+                ),
+            )
+        )
+        db.commit()
+
+    orchestrator = Mock()
+    orchestrator.generate_and_submit_agent_orders.return_value = (
+        successful_decision,
+        [],
+    )
+    coordinator = DailyTradingCoordinator(
+        decision_orchestrator=orchestrator,
+        session_factory=session_factory,
+    )
+
+    result = coordinator._process_agent(
+        competition_id=trading_setup["competition_id"],
+        agent_id=trading_setup["momentum_id"],
+        trading_date=TRADING_DATE,
+        submit_orders=True,
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["attempt_count"] == 2
+    orchestrator.generate_and_submit_agent_orders.assert_called_once()
+
+
+def test_historical_replay_submits_stored_decision_without_regenerating(
+    session_factory,
+    trading_setup,
+):
+    decision = AgentDecision.model_validate({
+        "as_of_date": TRADING_DATE,
+        "summary": "Buy one share of NVDA.",
+        "decisions": [{
+            "symbol": "NVDA",
+            "action": "buy",
+            "quantity": 1,
+            "confidence": 0.9,
+            "rationale": "Historical replay test.",
+        }],
+    })
+
+    with session_factory() as db:
+        db.add(
+            AgentDailyRun(
+                competition_id=trading_setup["competition_id"],
+                agent_id=trading_setup["momentum_id"],
+                trading_date=TRADING_DATE,
+                status="succeeded",
+                decision=decision.model_dump(mode="json"),
+                orders_created=0,
+                started_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(timezone.utc),
+            )
+        )
+        db.commit()
+
+    orchestrator = Mock()
+    orchestrator.submit_decision_orders.return_value = []
+    coordinator = DailyTradingCoordinator(
+        decision_orchestrator=orchestrator,
+        session_factory=session_factory,
+    )
+    submitted_at = datetime(2026, 10, 30, 20, 0, tzinfo=timezone.utc)
+
+    result = coordinator._process_agent(
+        competition_id=trading_setup["competition_id"],
+        agent_id=trading_setup["momentum_id"],
+        trading_date=TRADING_DATE,
+        submit_orders=True,
+        historical_replay=True,
+        submitted_at=submitted_at,
+    )
+
+    assert result["status"] == "succeeded"
+    orchestrator.generate_and_submit_agent_orders.assert_not_called()
+    orchestrator.generate_agent_decision.assert_not_called()
+    orchestrator.submit_decision_orders.assert_called_once()
+    call = orchestrator.submit_decision_orders.call_args.kwargs
+    assert call["decision"] == decision
+    assert call["as_of_date"] == TRADING_DATE
+    assert call["submitted_at"] == submitted_at
+
+
 def test_rejects_non_trading_date(
     session_factory,
     trading_setup,
@@ -372,7 +605,7 @@ def test_rejects_inactive_competition(
             trading_date=TRADING_DATE,
         )
 
-def test_recovery_only_submits_orders_for_latest_session(
+def test_recovery_replays_orders_and_decisions_for_every_ready_session(
     session_factory,
     trading_setup,
     monkeypatch,
@@ -434,9 +667,11 @@ def test_recovery_only_submits_orders_for_latest_session(
         "skipped": 0,
     }
 
+    historical_executor = Mock(return_value=[])
     recovery = DailyTradingRecoveryService(
         coordinator=coordinator,
         session_factory=session_factory,
+        execute_historical_orders_fn=historical_executor,
     )
 
     result = recovery.recover_competition(
@@ -451,9 +686,9 @@ def test_recovery_only_submits_orders_for_latest_session(
 
     assert len(calls) == 3
 
-    assert calls[0].kwargs["submit_orders"] is False
-    assert calls[1].kwargs["submit_orders"] is False
-    assert calls[2].kwargs["submit_orders"] is True
+    assert all(call.kwargs["submit_orders"] is True for call in calls)
+    assert all(call.kwargs["historical_replay"] is True for call in calls)
+    assert historical_executor.call_count == 3
 
 
 def test_recovery_returns_empty_result_when_no_sessions_are_completed(
@@ -575,10 +810,8 @@ def test_recovery_defers_latest_session_while_monitoring(
     calls = coordinator.run_competition_for_session.call_args_list
 
     assert len(calls) == 2
-    assert all(
-        call.kwargs["submit_orders"] is False
-        for call in calls
-    )
+    assert all(call.kwargs["submit_orders"] is True for call in calls)
+    assert all(call.kwargs["historical_replay"] is True for call in calls)
 
     assert all(
         call.kwargs["trading_date"] != date(2026, 10, 30)
@@ -591,7 +824,7 @@ def test_recovery_defers_latest_session_while_monitoring(
     "monitor_status",
     ["missed", None],
 )
-def test_recovery_does_not_submit_orders_without_healthy_monitor(
+def test_recovery_replays_sessions_without_live_monitor(
     session_factory,
     trading_setup,
     monkeypatch,
@@ -654,9 +887,11 @@ def test_recovery_does_not_submit_orders_without_healthy_monitor(
         "skipped": 0,
     }
 
+    historical_executor = Mock(return_value=[])
     recovery = DailyTradingRecoveryService(
         coordinator=coordinator,
         session_factory=session_factory,
+        execute_historical_orders_fn=historical_executor,
     )
 
     result = recovery.recover_competition(
@@ -672,11 +907,9 @@ def test_recovery_does_not_submit_orders_without_healthy_monitor(
 
     assert len(calls) == 3
 
-    # No session is allowed to submit orders.
-    assert all(
-        call.kwargs["submit_orders"] is False
-        for call in calls
-    )
+    assert all(call.kwargs["submit_orders"] is True for call in calls)
+    assert all(call.kwargs["historical_replay"] is True for call in calls)
+    assert historical_executor.call_count == 3
 
 
 
@@ -760,10 +993,8 @@ def test_recovery_skips_sessions_without_complete_market_data(
 
     assert len(calls) == 2
 
-    assert all(
-        call.kwargs["submit_orders"] is False
-        for call in calls
-    )
+    assert all(call.kwargs["submit_orders"] is True for call in calls)
+    assert all(call.kwargs["historical_replay"] is True for call in calls)
 
     assert [
         call.kwargs["trading_date"]
@@ -832,7 +1063,8 @@ def test_recovery_processes_only_ready_sessions(
     call = coordinator.run_competition_for_session.call_args
 
     assert call.kwargs["trading_date"] == date(2026, 10, 29)
-    assert call.kwargs["submit_orders"] is False
+    assert call.kwargs["submit_orders"] is True
+    assert call.kwargs["historical_replay"] is True
 
 
 def test_scheduling_failure_rolls_back_created_orders(

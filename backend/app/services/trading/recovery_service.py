@@ -1,4 +1,5 @@
-from typing import Any
+from datetime import date
+from typing import Any, Callable
 from uuid import UUID
 
 from sqlalchemy import select
@@ -6,6 +7,9 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.database import SessionLocal
 from app.models import Competition, MarketSessionMonitor
+from app.services.brokerage.execution_service import (
+    execute_queued_orders,
+)
 from app.services.trading.calendar_service import (
     get_completed_market_sessions,
 )
@@ -13,22 +17,18 @@ from app.services.trading.daily_trading_service import (
     DailyTradingCoordinator,
 )
 
-from datetime import date
+
+
 class DailyTradingRecoveryService:
     """
     Recovers completed daily trading sessions for active competitions.
 
-    Earlier historical sessions:
-        Generate and record decisions only.
-
-    Latest completed session:
-        Submit orders only if its market monitor status is completed.
+    Ready sessions are replayed chronologically. Orders due on a session
+    are filled from that session's historical bar before decisions are
+    generated at its close and scheduled for the next market open.
 
     If monitoring is still active:
         Defer the latest session until monitoring completes.
-
-    If monitoring was missed or no monitor record exists:
-        Generate decisions only, without submitting orders.
 
     Existing daily runs are handled by DailyTradingCoordinator.
     """
@@ -37,9 +37,11 @@ class DailyTradingRecoveryService:
         self,
         coordinator: DailyTradingCoordinator,
         session_factory: sessionmaker = SessionLocal,
+        execute_historical_orders_fn: Callable = execute_queued_orders,
     ):
         self.coordinator = coordinator
         self.session_factory = session_factory
+        self.execute_historical_orders_fn = execute_historical_orders_fn
 
     def recover_competition(
         self,
@@ -86,7 +88,7 @@ class DailyTradingRecoveryService:
             }
 
         latest_session = completed_sessions[-1]
-                # When supplied, only sessions with complete market data
+        # When supplied, only sessions with complete market data
         # may be recovered.
 
         if ready_sessions is None:
@@ -99,8 +101,8 @@ class DailyTradingRecoveryService:
             for trading_date in completed_sessions
             if trading_date in ready_session_dates
         ]
-        # Determine whether the latest completed session was
-        # monitored continuously through its execution deadline.
+        # The latest session may still be in the live monitoring grace
+        # period. Older sessions are replayed regardless of monitor state.
         with self.session_factory() as db:
             latest_monitor = db.scalar(
                 select(MarketSessionMonitor).where(
@@ -119,6 +121,7 @@ class DailyTradingRecoveryService:
         defer_latest_session = monitor_status == "monitoring"
 
         session_results = []
+        replay_execution_results = []
 
         for trading_date in sessions_to_process:
 
@@ -128,18 +131,22 @@ class DailyTradingRecoveryService:
             ):
                 continue
 
-            # Only the latest session with a completed monitor
-            # may submit orders.
-            submit_orders = (
-                trading_date == latest_session
-                and latest_session in ready_session_dates
-                and monitor_status == "completed"
-            )
+            with self.session_factory() as db:
+                executed_orders = self.execute_historical_orders_fn(
+                    db,
+                    competition_id,
+                    historical_session_date=trading_date,
+                )
+                replay_execution_results.append({
+                    "session_date": trading_date.isoformat(),
+                    "orders_processed": len(executed_orders),
+                })
 
             result = self.coordinator.run_competition_for_session(
                 competition_id=competition_id,
                 trading_date=trading_date,
-                submit_orders=submit_orders,
+                submit_orders=True,
+                historical_replay=True,
             )
 
             session_results.append(result)
@@ -156,6 +163,7 @@ class DailyTradingRecoveryService:
             ),
             "latest_completed_session": latest_session.isoformat(),
             "latest_session_monitor_status": monitor_status,
+            "historical_execution_results": replay_execution_results,
             "results": session_results,
         }
 

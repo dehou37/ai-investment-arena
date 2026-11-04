@@ -1,17 +1,17 @@
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import {
+  getCompetitions,
   getAgentPortfolio,
   getLeaderboard,
 } from "../services/api";
 import type {
+  CompetitionSummary,
   LeaderboardEntry,
   PortfolioResponse,
 } from "../services/api";
 
-const COMPETITION_ID = "20c32a1d-9a39-4ee6-8060-74c439ba28fd";
-
-type DashboardMode = "agents" | "leaderboard";
+type DashboardMode = "agents" | "leaderboard" | "portfolios";
 
 interface Props {
   mode: DashboardMode;
@@ -47,6 +47,8 @@ function strategyLabel(strategy: string): string {
 }
 
 export default function AgentDashboard({ mode }: Props) {
+  const [competitions, setCompetitions] = useState<CompetitionSummary[]>([]);
+  const [competitionId, setCompetitionId] = useState("");
   const [agents, setAgents] = useState<LeaderboardEntry[]>([]);
   const [selectedAgent, setSelectedAgent] =
     useState<LeaderboardEntry | null>(null);
@@ -54,29 +56,78 @@ export default function AgentDashboard({ mode }: Props) {
     useState<PortfolioResponse | null>(null);
 
   const [loading, setLoading] = useState(true);
+  const [refreshVersion, setRefreshVersion] = useState(0);
   const [portfolioLoading, setPortfolioLoading] = useState(false);
   const [error, setError] = useState("");
   const [portfolioError, setPortfolioError] = useState("");
 
-  const loadAgents = useCallback(async () => {
-    try {
-      const data = await getLeaderboard(COMPETITION_ID);
-      setAgents(data);
-      setError("");
-    } catch {
-      setError("Unable to load agent information.");
-    } finally {
-      setLoading(false);
+  useEffect(() => {
+    let active = true;
+
+    async function loadCompetitions() {
+      try {
+        const data = await getCompetitions();
+        if (!active) return;
+
+        setCompetitions(data);
+        if (data.length === 0) setLoading(false);
+        setCompetitionId((current) => {
+          if (data.some((competition) => competition.id === current)) {
+            return current;
+          }
+
+          return (
+            data.find((competition) => competition.status === "active") ??
+            data[0]
+          )?.id ?? "";
+        });
+        setError("");
+      } catch {
+        if (active) {
+          setError("Unable to load competitions.");
+          setLoading(false);
+        }
+      }
     }
+
+    void loadCompetitions();
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
-    loadAgents();
+    if (!competitionId) return;
 
-    const interval = window.setInterval(loadAgents, 30000);
+    let active = true;
 
-    return () => window.clearInterval(interval);
-  }, [loadAgents]);
+    async function refreshAgents() {
+      try {
+        const data = await getLeaderboard(competitionId);
+        if (!active) return;
+        setAgents(data);
+        setError("");
+      } catch {
+        if (active) setError("Unable to load agent information.");
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    void refreshAgents();
+    const interval = window.setInterval(() => {
+      void refreshAgents();
+    }, 30000);
+
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [competitionId, refreshVersion]);
+
+  const selectedCompetition = competitions.find(
+    (competition) => competition.id === competitionId,
+  );
 
   const selectAgent = async (agent: LeaderboardEntry) => {
     setSelectedAgent(agent);
@@ -86,7 +137,7 @@ export default function AgentDashboard({ mode }: Props) {
 
     try {
       const data = await getAgentPortfolio(
-        COMPETITION_ID,
+        competitionId,
         agent.agent_id,
       );
 
@@ -135,7 +186,9 @@ export default function AgentDashboard({ mode }: Props) {
 
         <div className="summary-card">
           <span>Starting capital</span>
-          <strong>$10,000</strong>
+          <strong>{selectedCompetition
+            ? formatMoney(selectedCompetition.initial_cash)
+            : "—"}</strong>
           <small>Per agent</small>
         </div>
       </section>
@@ -146,21 +199,54 @@ export default function AgentDashboard({ mode }: Props) {
             <h2>
               {mode === "leaderboard"
                 ? "Competition Leaderboard"
-                : "AI Agents"}
+                : mode === "portfolios"
+                  ? "Agent Portfolios"
+                  : "AI Agents"}
             </h2>
             <p>
               {mode === "leaderboard"
                 ? "Ranked by current portfolio equity"
-                : "All registered agents and their strategies"}
+                : mode === "portfolios"
+                  ? "Select an agent to inspect its holdings and performance"
+                  : "All registered agents and their strategies"}
             </p>
           </div>
-
-          <button className="refresh-button" onClick={loadAgents}>
-            Refresh
-          </button>
+          <div className="dashboard-controls">
+            <label className="sr-only" htmlFor="competition-select">
+              Competition
+            </label>
+            <select
+              id="competition-select"
+              className="competition-select"
+              value={competitionId}
+              onChange={(event) => {
+                setLoading(true);
+                setCompetitionId(event.target.value);
+                setSelectedAgent(null);
+                setPortfolio(null);
+              }}
+              disabled={competitions.length === 0}
+            >
+              {competitions.length === 0 ? (
+                <option value="">No competitions</option>
+              ) : (
+                competitions.map((competition) => (
+                  <option key={competition.id} value={competition.id}>
+                    {competition.name} ({competition.status})
+                  </option>
+                ))
+              )}
+            </select>
+            <button
+              className="refresh-button"
+              onClick={() => setRefreshVersion((version) => version + 1)}
+            >
+              Refresh
+            </button>
+          </div>
         </div>
 
-        {mode === "agents" ? (
+        {mode !== "leaderboard" ? (
           <div className="agent-grid">
             {agents.map((agent) => (
               <button
@@ -230,27 +316,13 @@ export default function AgentDashboard({ mode }: Props) {
               </thead>
 
               <tbody>
-                {[...agents]
-                  .sort((a, b) => {
-                    if (
-                      a.portfolio_equity === null ||
-                      b.portfolio_equity === null
-                    ) {
-                      return 0;
-                    }
-
-                    return (
-                      Number(b.portfolio_equity) -
-                      Number(a.portfolio_equity)
-                    );
-                  })
-                  .map((agent, index) => (
+                {agents.map((agent) => (
                     <tr
                       key={agent.agent_id}
                       className="clickable-row"
                       onClick={() => selectAgent(agent)}
                     >
-                      <td>#{index + 1}</td>
+                      <td>#{agent.rank}</td>
                       <td><strong>{agent.agent_name}</strong></td>
                       <td>{strategyLabel(agent.strategy_type)}</td>
                       <td>
