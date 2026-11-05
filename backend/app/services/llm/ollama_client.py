@@ -5,6 +5,9 @@ from pydantic import BaseModel
 from app.core.config import settings
 
 
+MAX_OUTPUT_TOKENS = 4096
+
+
 class OllamaClientError(Exception):
     """Raised when communication with Ollama fails."""
 
@@ -50,6 +53,7 @@ class OllamaClient:
             "options": {
                 "temperature": 0,
                 "num_ctx": 8192,
+                "num_predict": MAX_OUTPUT_TOKENS,
             },
         }
 
@@ -82,6 +86,17 @@ class OllamaClient:
             raise OllamaClientError(
                 "Ollama returned an invalid JSON response."
             ) from error
+
+        if not isinstance(response_data, dict):
+            raise OllamaClientError(
+                "Ollama response did not contain message content."
+            )
+
+        if response_data.get("done_reason") == "length":
+            raise OllamaClientError(
+                "Ollama truncated its response at the output token limit "
+                f"({MAX_OUTPUT_TOKENS})."
+            )
 
         try:
             content = response_data["message"]["content"]
