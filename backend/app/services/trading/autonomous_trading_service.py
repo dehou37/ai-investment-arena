@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from uuid import UUID
 
@@ -191,12 +192,47 @@ class AutonomousTradingService:
             "recovery": recovery_result,
         }
 
-    def run_all_active_competitions(self) -> dict[str, Any]:
+    def run_all_active_competitions(
+        self,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
         """
-        Process every active competition independently.
+        Complete expired competitions, then process remaining active ones.
         """
 
+        current_time = now or datetime.now(timezone.utc)
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+        else:
+            current_time = current_time.astimezone(timezone.utc)
+
         with self.session_factory() as db:
+            active_competitions = db.scalars(
+                select(Competition).where(
+                    Competition.status == "active",
+                    Competition.started_at.is_not(None),
+                )
+            ).all()
+
+            completed_count = 0
+            for competition in active_competitions:
+                started_at = competition.started_at
+                if started_at.tzinfo is None:
+                    started_at = started_at.replace(tzinfo=timezone.utc)
+                else:
+                    started_at = started_at.astimezone(timezone.utc)
+
+                end_at = started_at + timedelta(
+                    days=competition.duration_days
+                )
+                if current_time >= end_at:
+                    competition.status = "completed"
+                    competition.completed_at = current_time
+                    completed_count += 1
+
+            if completed_count:
+                db.commit()
+
             competition_ids = list(
                 db.scalars(
                     select(Competition.id).where(
@@ -228,6 +264,7 @@ class AutonomousTradingService:
 
         return {
             "total_competitions": len(competition_ids),
+            "completed_competitions": completed_count,
             "succeeded": sum(
                 1 for result in results
                 if result["status"] == "succeeded"

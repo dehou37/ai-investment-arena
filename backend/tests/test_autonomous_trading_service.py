@@ -355,3 +355,43 @@ def test_one_competition_failure_does_not_stop_others(
 
     assert statuses[str(competition_ids[0])] == "failed"
     assert statuses[str(competition_ids[1])] == "succeeded"
+
+
+def test_competitions_complete_at_duration_boundary(
+    session_factory,
+    autonomous_setup,
+):
+    autonomous = create_service(session_factory)
+    autonomous.run_competition = Mock(
+        return_value={"competition_id": str(autonomous_setup)}
+    )
+
+    before_end = datetime(
+        2027, 1, 25, 11, 59, 59,
+        tzinfo=timezone.utc,
+    )
+    result = autonomous.run_all_active_competitions(now=before_end)
+
+    assert result["total_competitions"] == 1
+    assert result["completed_competitions"] == 0
+    autonomous.run_competition.assert_called_once_with(
+        competition_id=autonomous_setup
+    )
+
+    end_time = datetime(
+        2027, 1, 25, 12, 0,
+        tzinfo=timezone.utc,
+    )
+    result = autonomous.run_all_active_competitions(now=end_time)
+
+    assert result["total_competitions"] == 0
+    assert result["completed_competitions"] == 1
+    autonomous.run_competition.assert_called_once()
+
+    with session_factory() as db:
+        competition = db.get(Competition, autonomous_setup)
+
+        assert competition.status == "completed"
+        assert competition.completed_at.replace(
+            tzinfo=timezone.utc
+        ) == end_time

@@ -30,6 +30,8 @@ def build_market_context():
             "name": "AI Investment Arena - Season 2",
             "initial_cash": 10000.0,
             "duration_days": 90,
+            "start_date": "2026-10-30",
+            "scheduled_end_date": "2027-01-28",
             "benchmark_symbol": "SPY",
         },
         "agent": {
@@ -226,6 +228,18 @@ def test_prompt_excludes_historical_ohlcv_bars():
     assert '"history"' not in user_message
     assert '"sma_20"' in user_message
     assert '"momentum_20d"' in user_message
+
+
+def test_prompt_includes_competition_horizon():
+    client = FakeOllamaClient(make_response())
+    strategy = LLMAnalystStrategy(ollama_client=client)
+
+    strategy.generate_decision(build_market_context())
+
+    user_message = client.last_messages[1]["content"]
+
+    assert '"start_date":"2026-10-30"' in user_message
+    assert '"scheduled_end_date":"2027-01-28"' in user_message
 
 
 def test_rejects_invalid_llm_json():

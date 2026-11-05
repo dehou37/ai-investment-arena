@@ -544,6 +544,11 @@ def build_agent_market_context(
             "name": competition.name,
             "initial_cash": float(competition.initial_cash),
             "duration_days": competition.duration_days,
+            "start_date": competition.started_at.date().isoformat(),
+            "scheduled_end_date": (
+                competition.started_at
+                + timedelta(days=competition.duration_days)
+            ).date().isoformat(),
             "benchmark_symbol": benchmark_stock.symbol,
         },
         "agent": {

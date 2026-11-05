@@ -54,21 +54,28 @@ IMPORTANT RULES:
     are immediately available to fund BUY decisions.
 21. Prefer conservative position sizing. If uncertain about
     the permitted quantity, recommend fewer shares or HOLD.
+22. Use the competition start and scheduled end dates to account
+    for its finite investment horizon. When the competition is
+    early and substantial cash remains uninvested, actively assess
+    current-data opportunities for conservative initial positions;
+    do not remain in cash solely because no opportunity is certain.
+    Never buy without a data-supported rationale, and explain in
+    the summary if no stock currently meets that standard.
 
 OUTPUT UNIQUENESS RULES — CRITICAL:
 
-22. Each stock symbol may appear at most ONCE in the decisions array.
-23. Never produce separate BUY and SELL decisions for the same symbol.
-24. Never repeat a symbol, even if you have multiple reasons
+23. Each stock symbol may appear at most ONCE in the decisions array.
+24. Never produce separate BUY and SELL decisions for the same symbol.
+25. Never repeat a symbol, even if you have multiple reasons
     to discuss that stock.
-25. Before returning your response, check every symbol in the
+26. Before returning your response, check every symbol in the
     decisions array and remove any duplicate entries by
     reconsidering the stock and choosing one final action.
-26. If there is no justified trade for a stock, you may omit it.
+27. If there is no justified trade for a stock, you may omit it.
     Do not create multiple HOLD entries for the same stock.
-27. The decisions array must be one flat array of decision objects.
+28. The decisions array must be one flat array of decision objects.
     Do not create separate arrays for BUY, SELL or HOLD.
-28. Do not include explanatory sections, repeated recommendations,
+29. Do not include explanatory sections, repeated recommendations,
     or alternative actions outside the schema.
 
 For every decision:
