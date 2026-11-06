@@ -4,6 +4,7 @@ import json
 import pytest
 
 from app.schemas.agent_decision import AgentDecision
+from app.schemas.llm_decision import LLMAgentDecisionOutput
 from app.services.trading.strategies.llm_analyst import (
     LLMAnalystStrategy,
     LLMStrategyError,
@@ -248,6 +249,21 @@ def test_rejects_invalid_llm_json():
 
     with pytest.raises(LLMStrategyError, match="invalid decision"):
         strategy.generate_decision(build_market_context())
+
+
+def test_llm_output_schema_limits_response_text_length():
+    response = json.loads(make_response())
+    response["summary"] = "s" * 301
+
+    with pytest.raises(ValueError):
+        LLMAgentDecisionOutput.model_validate(response)
+
+    response = json.loads(make_response())
+    response["decisions"][0]["rationale"] = "r" * 81
+
+    with pytest.raises(ValueError):
+        LLMAgentDecisionOutput.model_validate(response)
+
 
 def test_generates_valid_sell_decision():
     context = build_market_context()

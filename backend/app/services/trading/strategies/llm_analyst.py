@@ -77,13 +77,16 @@ OUTPUT UNIQUENESS RULES — CRITICAL:
     Do not create separate arrays for BUY, SELL or HOLD.
 29. Do not include explanatory sections, repeated recommendations,
     or alternative actions outside the schema.
+30. Omit HOLD decisions for stocks not currently held. Use HOLD only
+    for existing holdings that need no action.
 
 For every decision:
 - BUY requires a positive whole-share quantity.
 - SELL requires a positive whole-share quantity.
 - HOLD must have quantity set to null.
 - Confidence must be between 0 and 1.
-- Provide a concise explanation grounded in the supplied data.
+- Keep each rationale to one concise sentence of at most 80 characters.
+- Keep the summary to at most 300 characters.
 
 Do not claim certainty about future stock prices.
 

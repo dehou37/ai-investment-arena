@@ -11,6 +11,14 @@ from pydantic import (
 from app.schemas.agent_decision import AgentTradeDecision
 
 
+class LLMAgentTradeDecisionOutput(AgentTradeDecision):
+    rationale: str = Field(
+        min_length=1,
+        max_length=80,
+        description="A concise rationale grounded in the supplied data.",
+    )
+
+
 class LLMAgentDecisionOutput(BaseModel):
     """
     LLM-facing response schema.
@@ -27,13 +35,13 @@ class LLMAgentDecisionOutput(BaseModel):
 
     summary: str = Field(
         min_length=1,
-        max_length=1000,
-        description="Summary of the investment strategy and market outlook.",
+        max_length=300,
+        description="Concise strategy and market outlook summary.",
     )
 
-    decisions: list[AgentTradeDecision] = Field(
+    decisions: list[LLMAgentTradeDecisionOutput] = Field(
         max_length=30,
-        description="Trading decisions for stocks in the available universe.",
+        description="Decisions for stocks in the available universe.",
     )
 
     @field_validator("as_of_date")
